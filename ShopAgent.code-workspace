@@ -1,0 +1,15 @@
+{
+  "folders": [
+    {
+      "path": ".",
+    },
+    {
+      "path": "ecommerce-service",
+    },
+  ],
+  "settings": {
+    "terminal.integrated.env.osx": {
+      "PYTHONPATH": "${workspaceFolder:ecommerce-service}",
+    },
+  },
+}
