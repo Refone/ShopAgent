@@ -11,6 +11,10 @@
     },
   ],
   "settings": {
+    "files.eol": "\n",
+    "files.insertFinalNewline": true,
+    "files.trimFinalNewlines": true,
+
     "files.exclude": {
       "**/__pycache__": true,
       "**/.venv": true,
