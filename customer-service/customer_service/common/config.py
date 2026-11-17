@@ -7,6 +7,8 @@ ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
+
     database_url: str = "postgresql+psycopg://customer_service:customer_service@127.0.0.1:5432/customer_service"
     redis_url: str = "redis://192.168.200.188:6379/0"
     jwt_secret: str = "ecommerce-secret"
@@ -20,7 +22,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5174",
     ]
 
-    model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
+    conversation_idle_timeout_seconds: int = 600
 
 
 @lru_cache

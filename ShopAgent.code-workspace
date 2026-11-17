@@ -28,6 +28,12 @@
       "**/Thumbs.db": true,
     },
 
+    "python.analysis.extraPaths": [
+      "${workspaceFolder:ecommerce-service}",
+      "${workspaceFolder:customer-service}",
+    ],
+    "python.analysis.autoImportCompletions": true,
+
     "terminal.integrated.env.osx": {
       "PYTHONPATH": "${workspaceFolder:ecommerce-service}:${workspaceFolder:customer-service}",
     },

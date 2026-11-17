@@ -11,12 +11,15 @@ from sqlalchemy.ext.asyncio import (
 from customer_service.common.config import get_settings
 from customer_service.common.event_loop import run_async
 
-db_engine: AsyncEngine = create_async_engine(
+__all__ = ["DB_ENGINE", "get_db_session"]
+
+DB_ENGINE: AsyncEngine = create_async_engine(
     url=get_settings().database_url,
+    echo=False,  # 打印 SQL 日志，方便调试
 )
 
 session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-    bind=db_engine,
+    bind=DB_ENGINE,
     # 上一步查询的数据是否还保留在内存中
     # 如果设置为 True，提交后对象会从内存中失效，需要重新查询才能获取最新数据
     # User = 查询出来的数据
