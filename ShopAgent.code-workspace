@@ -6,10 +6,36 @@
     {
       "path": "ecommerce-service",
     },
+    {
+      "path": "customer-service",
+    },
   ],
   "settings": {
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.venv": true,
+      "**/.ruff_cache": true,
+      "**/node_modules": true,
+      "**/.git": true,
+      "**/.svn": true,
+      "**/.hg": true,
+      "**/.jj": true,
+      "**/.DS_Store": true,
+      "**/Thumbs.db": true,
+    },
+
     "terminal.integrated.env.osx": {
-      "PYTHONPATH": "${workspaceFolder:ecommerce-service}",
+      "PYTHONPATH": "${workspaceFolder:ecommerce-service}:${workspaceFolder:customer-service}",
+    },
+
+    "[python]": {
+      "editor.formatOnSave": true,
+      "editor.defaultFormatter": "charliermarsh.ruff", // 指定 Ruff 为默认格式化器
+
+      "editor.codeActionsOnSave": {
+        "source.fixAll.ruff": "explicit", // 自动修复所有可修复的 lint 问题
+        "source.organizeImports.ruff": "explicit", // 整理 import 语句
+      },
     },
   },
 }
