@@ -34,7 +34,7 @@ class ConversationRepository:
             .limit(1)
         )
 
-    async def add_conversation(
+    def add_conversation(
         self,
         user_id: str,
         mode: str = "AI",
@@ -53,8 +53,6 @@ class ConversationRepository:
         )
 
         self._session.add(conversation)
-
-        await self._session.flush()
 
         return conversation
 
@@ -80,7 +78,7 @@ class ConversationRepository:
 
         return list(result.all())
 
-    async def close_conversation(self, conversation: Conversation) -> None:
+    def close_conversation(self, conversation: Conversation) -> None:
         """
         关闭指定的会话，将其状态改为 "CLOSED" 并设置结束时间。
 
@@ -93,8 +91,6 @@ class ConversationRepository:
         # 直接修改属性后，调用 await self.session.flush() 就能将修改同步到数据库。
         conversation.ended_at = conversation.last_active_at
         conversation.mode = "CLOSED"
-
-        await self._session.flush()
 
     async def get_conversation_by_id(self, conversation_id: str) -> Conversation | None:
         """

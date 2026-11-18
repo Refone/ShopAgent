@@ -15,7 +15,7 @@ __all__ = ["DB_ENGINE", "get_db_session"]
 
 DB_ENGINE: AsyncEngine = create_async_engine(
     url=get_settings().database_url,
-    echo=False,  # 打印 SQL 日志，方便调试
+    echo=True,  # 打印 SQL 日志，方便调试
 )
 
 session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -31,8 +31,8 @@ session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
 
 async def get_db_session() -> AsyncGenerator[AsyncSession]:
     """
-    1. 调用者：fastapi 在处理陆游请求时调用
-    2. 方法返回的 session 要用 yield, 不能 return
+    方法返回的 session 要用 yield, 不能 return
+    同一个请求, 通过依赖注入(Depends)获取的 session 是同一个对象
     """
 
     async with session_factory() as session:

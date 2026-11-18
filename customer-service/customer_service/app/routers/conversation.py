@@ -31,7 +31,7 @@ async def get_current_conversation(
 
     authorized_user = auth_service.get_authorized_user(authorization, "customer")
 
-    result = await conversation_service.get_current_conversation(
+    result = await conversation_service.current_conversation_status(
         authorized_user.user_id
     )
 

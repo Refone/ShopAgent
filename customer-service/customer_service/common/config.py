@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     ]
 
     conversation_idle_timeout_seconds: int = 600
+    message_merge_delay_ms: int = 800
+    message_merge_max_wait_ms: int = 2000
 
 
 @lru_cache

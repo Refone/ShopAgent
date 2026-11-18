@@ -20,7 +20,7 @@ class ConversationService:
 
         self._conversation_timeout_seconds = settings.conversation_idle_timeout_seconds
 
-    async def get_current_conversation(self, user_id: str) -> dict[str, Any]:
+    async def current_conversation_status(self, user_id: str) -> dict[str, Any]:
         """
         获取当前用户的会话信息，如果不存在则创建一个新的会话。
         """
@@ -31,15 +31,22 @@ class ConversationService:
         # 2. 当前是否有轮次消息
         is_procession = await self._turn_repo.has_active_turn(conversation.id)
 
-        # repo 层做 flush, service 层负责 commit
-        await self._session.commit()
-
         # 3. 返回当前会话信息
         return {
             "id": conversation.id,
             "mode": conversation.mode,
             "is_procession": is_procession,  # AI 服务有没有在处理轮次消息
         }
+
+    async def ensure_locked_active_conversation(
+        self,
+        user_id: str,
+    ) -> Conversation:
+        # 加锁：两个请求后面一个请求能够从数据库中查询到第一个请求修改后的conversation版本
+
+        conversation = await self.ensure_active_conversation(user_id)
+        await self._session.refresh(conversation, with_for_update=True)
+        return conversation
 
     async def ensure_active_conversation(self, user_id: str) -> Conversation:
         """
@@ -59,18 +66,15 @@ class ConversationService:
             ),
         )
 
-        # 如果查到，直接返回
-        if conversation:
-            return conversation
+        if not conversation:
+            # 如果没有，创建一个智能客服接管的会话 (AI 会话)
+            conversation = self._conversation_repo.add_conversation(
+                user_id,
+                ConversationMode.AI,
+            )
+            await self._session.flush()
 
-        # 如果没有，创建一个智能客服接管的会话 (AI 会话)
-        return await self._create_ai_conversation(user_id)
-
-    async def _create_ai_conversation(self, user_id: str) -> Conversation:
-        return await self._conversation_repo.add_conversation(
-            user_id,
-            ConversationMode.AI,
-        )
+        return conversation
 
     async def _close_timeout_conversation(self, user_id: str) -> None:
         # 查询当前用户会话是 AI 模式的会话
@@ -81,11 +85,16 @@ class ConversationService:
             ConversationMode.AI,
         )
 
+        has_closed_conversation = False
         for conversation in conversations:
             if conversation.is_timeout(
                 timeout_seconds=self._conversation_timeout_seconds
             ):
-                await self._conversation_repo.close_conversation(conversation)
+                self._conversation_repo.close_conversation(conversation)
+                has_closed_conversation = True
+
+        if has_closed_conversation:
+            await self._session.flush()
 
     async def get_conversation_detail(
         self,

@@ -17,3 +17,19 @@ class ConversationTurnRepository:
                 )
             )
         )
+
+    async def find_collecting_turn(
+        self,
+        conversation_id: str,
+    ) -> ConversationTurn | None:
+        return await self._session.scalar(
+            select(ConversationTurn)
+            .where(
+                ConversationTurn.conversation_id == conversation_id,
+                ConversationTurn.status.in_(["COLLECTING"]),
+            )
+            .with_for_update()
+        )
+
+    def add_turn(self, turn: ConversationTurn):
+        self._session.add(turn)
