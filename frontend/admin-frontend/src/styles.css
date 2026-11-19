@@ -1,7 +1,5 @@
-@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&family=Oxanium:wght@500;600;700&display=swap");
-
 :root {
-  font-family: "Noto Sans SC", sans-serif;
+  font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
   color: #dcebf0;
   background: #050e13;
   font-synthesis: none;
@@ -147,7 +145,7 @@ button:disabled {
 }
 .logo small {
   color: #4f737e;
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 10px;
   letter-spacing: 0.18em;
 }
@@ -209,7 +207,7 @@ button:disabled {
   padding: 5px 8px;
   color: var(--lime);
   background: rgba(167, 228, 104, 0.07);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -262,7 +260,7 @@ button:disabled {
   content: "//";
   margin-right: 8px;
   color: var(--cyan);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 12px;
 }
 .panel-title > span {
@@ -271,7 +269,7 @@ button:disabled {
   padding: 4px 7px;
   color: var(--cyan);
   background: rgba(80, 220, 234, 0.07);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 11px;
   text-align: center;
 }
@@ -347,7 +345,7 @@ button:disabled {
   border: 1px solid var(--line-hot);
   color: var(--cyan);
   background: var(--cyan-soft, rgba(80, 220, 234, 0.08));
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 12px;
   clip-path: polygon(
     8px 0,
@@ -403,8 +401,7 @@ button:disabled {
 }
 .conversation-head small {
   color: var(--muted);
-  font-family: "JetBrains Mono", monospace;
-  font-size: 11px;
+  font-size: 12px;
 }
 .conversation-head button,
 .reply-box button,
@@ -484,9 +481,25 @@ button:disabled {
 }
 .transcript small {
   color: var(--muted);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 10px;
   text-transform: uppercase;
+}
+.transcript .system-notice {
+  margin: 16px auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.transcript .system-notice::before,
+.transcript .system-notice::after {
+  content: "";
+  width: 48px;
+  height: 1px;
+  background: var(--line);
 }
 .reply-box {
   display: flex;
@@ -520,7 +533,7 @@ button:disabled {
   content: "[ NO DATA ]";
   margin-bottom: 5px;
   color: #42636d;
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 11px;
   letter-spacing: 0.15em;
 }
@@ -561,7 +574,7 @@ button:disabled {
   padding: 4px 7px;
   color: var(--lime);
   background: rgba(167, 228, 104, 0.06);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 10px;
   letter-spacing: 0.12em;
 }
@@ -627,7 +640,7 @@ th {
   z-index: 1;
   color: #5f7d86;
   background: #071820;
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.08em;
@@ -653,16 +666,27 @@ td small {
   padding: 4px 7px;
   color: var(--muted);
   background: rgba(118, 147, 157, 0.06);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
 }
 .state.ready,
-.state.completed {
+.state.completed,
+.state.answer {
   border-color: rgba(167, 228, 104, 0.25);
   color: var(--lime);
   background: rgba(167, 228, 104, 0.07);
+}
+.state.clarify {
+  border-color: rgba(80, 220, 234, 0.35);
+  color: var(--cyan);
+  background: rgba(80, 220, 234, 0.08);
+}
+.state.decline {
+  border-color: rgba(255, 123, 88, 0.35);
+  color: var(--orange);
+  background: rgba(255, 123, 88, 0.08);
 }
 .state.failed {
   border-color: rgba(255, 118, 110, 0.25);
@@ -670,6 +694,7 @@ td small {
   background: rgba(255, 118, 110, 0.07);
 }
 .state.handed_off,
+.state.request_handoff,
 .state.pending,
 .state.running {
   border-color: rgba(237, 207, 90, 0.25);
@@ -691,7 +716,7 @@ td small {
 }
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 12px;
   margin-bottom: 15px;
 }
@@ -742,7 +767,7 @@ td small {
 .metrics span,
 .metrics small {
   color: var(--muted);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 12px;
   text-transform: uppercase;
 }
@@ -794,7 +819,7 @@ td small {
 }
 .run-row strong,
 .inspection dd {
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
 }
 .run-row strong {
   font-size: 12px;
@@ -808,7 +833,7 @@ td small {
 }
 .run-row > b {
   color: var(--muted);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 11px;
   text-align: right;
 }
@@ -823,7 +848,7 @@ td small {
 }
 .inspection dt {
   color: var(--muted);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 10px;
   text-transform: uppercase;
 }
@@ -844,7 +869,7 @@ td small {
   padding: 9px;
   color: #9ed5dc;
   background: #031016;
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 10px;
   line-height: 1.6;
 }
@@ -858,7 +883,7 @@ td small {
 .tool-call small {
   float: right;
   color: var(--muted);
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
 }
 .evaluation {
   margin-top: 15px;
@@ -866,7 +891,7 @@ td small {
   overflow: auto;
   color: #9ed5dc;
   background: #031016;
-  font-family: "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 11px;
   line-height: 1.65;
 }

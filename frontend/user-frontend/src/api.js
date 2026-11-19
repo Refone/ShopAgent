@@ -20,7 +20,7 @@ export async function login(userId) {
     await fetch(`${ECOMMERCE_SERVICE_URL}/api/v1/auth/demo-token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userId, role: "customer" }),
+      body: JSON.stringify({ user_id: userId, role: "user" }),
     }),
   );
 }
@@ -42,16 +42,8 @@ export async function apiFetch(baseUrl, path, token, options = {}) {
 }
 
 export const customerApi = {
-  history: (token, afterSequence = null) =>
-    apiFetch(
-      CUSTOMER_SERVICE_URL,
-      `/api/v1/chat/history${afterSequence == null ? "" : `?after_sequence=${afterSequence}`}`,
-      token,
-    ),
-  currentConversation: (token) =>
-    apiFetch(CUSTOMER_SERVICE_URL, "/api/v1/conversations/current", token, {
-      method: "POST",
-    }),
+  history: (token) =>
+    apiFetch(CUSTOMER_SERVICE_URL, "/api/v1/chat/history", token),
   send: (token, payload) =>
     apiFetch(CUSTOMER_SERVICE_URL, "/api/v1/chat/messages", token, {
       method: "POST",
@@ -126,14 +118,12 @@ export function createRealtimeConnection(token, callbacks = {}) {
   let socket;
   let stopped = false;
   let retryTimer;
-  let heartbeatTimer;
   let attempts = 0;
   let hasConnected = false;
   const websocketUrl = `${CUSTOMER_SERVICE_URL.replace(/^http/, "ws")}/api/v1/realtime`;
 
   const clearTimers = () => {
     window.clearTimeout(retryTimer);
-    window.clearInterval(heartbeatTimer);
   };
   const connect = () => {
     if (stopped) return;
@@ -144,17 +134,13 @@ export function createRealtimeConnection(token, callbacks = {}) {
     );
     socket.addEventListener("message", (browserEvent) => {
       const event = JSON.parse(browserEvent.data);
-      if (event.type === "connected") {
+      if (event.event_type === "connected") {
         const reconnected = hasConnected;
         hasConnected = true;
         attempts = 0;
         callbacks.onState?.("connected");
         callbacks.onConnected?.({ reconnected });
-        heartbeatTimer = window.setInterval(() => {
-          if (socket?.readyState === WebSocket.OPEN)
-            socket.send(JSON.stringify({ type: "ping" }));
-        }, 20000);
-      } else if (event.type !== "pong") {
+      } else {
         callbacks.onEvent?.(event);
       }
     });

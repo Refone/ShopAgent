@@ -6,6 +6,7 @@ export const AI_SERVICE_URL =
   import.meta.env.VITE_AI_SERVICE_URL || "http://127.0.0.1:8002";
 
 async function parseResponse(response) {
+  if (response.status === 204) return null;
   const body = await response
     .json()
     .catch(() => ({ detail: response.statusText }));
@@ -22,7 +23,7 @@ async function parseResponse(response) {
 }
 
 export async function login(userId) {
-  const role = userId.startsWith("admin_") ? "admin" : "agent";
+  const role = userId.startsWith("admin_") ? "admin" : "staff";
   return parseResponse(
     await fetch(`${ECOMMERCE_SERVICE_URL}/api/v1/auth/demo-token`, {
       method: "POST",
@@ -44,29 +45,21 @@ export async function apiFetch(baseUrl, path, token, options = {}) {
 export const adminApi = {
   handoffs: (token) =>
     apiFetch(CUSTOMER_SERVICE_URL, "/api/v1/handoffs", token),
-  conversation: (token, id) =>
-    apiFetch(CUSTOMER_SERVICE_URL, `/api/v1/conversations/${id}`, token),
+  messages: (token, id) =>
+    apiFetch(CUSTOMER_SERVICE_URL, `/api/v1/handoffs/${id}/messages`, token),
   accept: (token, id) =>
     apiFetch(CUSTOMER_SERVICE_URL, `/api/v1/handoffs/${id}/accept`, token, {
       method: "POST",
     }),
-  takeover: (token, id, expectedAgentId) =>
-    apiFetch(CUSTOMER_SERVICE_URL, `/api/v1/handoffs/${id}/takeover`, token, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expected_agent_id: expectedAgentId }),
-    }),
-  reply: (token, id, messageId, text) =>
+  reply: (token, id, text) =>
     apiFetch(CUSTOMER_SERVICE_URL, `/api/v1/handoffs/${id}/messages`, token, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message_id: messageId, text }),
+      body: JSON.stringify({ text }),
     }),
-  resolve: (token, id, resolution) =>
+  resolve: (token, id) =>
     apiFetch(CUSTOMER_SERVICE_URL, `/api/v1/handoffs/${id}/resolve`, token, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ resolution }),
     }),
   serviceMetrics: (token) =>
     apiFetch(CUSTOMER_SERVICE_URL, "/api/v1/admin/metrics", token),
@@ -76,35 +69,27 @@ export const adminApi = {
     apiFetch(AI_SERVICE_URL, "/api/v1/admin/metrics", token),
   runs: (token) => apiFetch(AI_SERVICE_URL, "/api/v1/runs", token),
   run: (token, id) => apiFetch(AI_SERVICE_URL, `/api/v1/runs/${id}`, token),
-  documents: (token) =>
-    apiFetch(AI_SERVICE_URL, "/api/v1/knowledge/documents", token),
-  upload: async (token, file, title, category) => {
-    const body = new FormData();
-    body.append("file", file);
-    body.append("title", title);
-    body.append("category", category);
-    return apiFetch(AI_SERVICE_URL, "/api/v1/knowledge/documents", token, {
+  knowledgeList: (token) =>
+    apiFetch(AI_SERVICE_URL, "/api/v1/knowledge", token),
+  uploadKnowledge: (token, file) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiFetch(AI_SERVICE_URL, "/api/v1/knowledge/upload", token, {
       method: "POST",
-      body,
+      body: formData,
     });
   },
-  evaluate: (token) =>
-    apiFetch(AI_SERVICE_URL, "/api/v1/evaluations/run", token, {
-      method: "POST",
-    }),
 };
 
 export function createRealtimeConnection(token, callbacks = {}) {
   let socket;
   let stopped = false;
   let retryTimer;
-  let heartbeatTimer;
   let attempts = 0;
   const websocketUrl = `${CUSTOMER_SERVICE_URL.replace(/^http/, "ws")}/api/v1/realtime`;
 
   const clearTimers = () => {
     window.clearTimeout(retryTimer);
-    window.clearInterval(heartbeatTimer);
   };
   const connect = () => {
     if (stopped) return;
@@ -115,14 +100,10 @@ export function createRealtimeConnection(token, callbacks = {}) {
     );
     socket.addEventListener("message", (browserEvent) => {
       const event = JSON.parse(browserEvent.data);
-      if (event.type === "connected") {
+      if (event.event_type === "connected") {
         attempts = 0;
         callbacks.onState?.("connected");
-        heartbeatTimer = window.setInterval(() => {
-          if (socket?.readyState === WebSocket.OPEN)
-            socket.send(JSON.stringify({ type: "ping" }));
-        }, 20000);
-      } else if (event.type !== "pong") {
+      } else {
         callbacks.onEvent?.(event);
       }
     });
