@@ -1,0 +1,98 @@
+name: Customer Service Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: customer-service-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: customer-service
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: customer-service
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: customer_service
+          POSTGRES_PASSWORD: customer_service
+          POSTGRES_DB: customer_service
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U customer_service -d customer_service"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://customer_service:customer_service@127.0.0.1:5432/customer_service
+      REDIS_URL: redis://127.0.0.1:6379/0
+      JWT_SECRET: ecommerce-secret
+      JWT_ALGORITHM: HS256
+      API_HOST: 127.0.0.1
+      API_PORT: 18000
+      CORS_ORIGINS: '["http://127.0.0.1:5173"]'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          working-directory: customer-service
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Create database tables
+        run: .venv/bin/python -m customer_service.scripts.init_db
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+
+          .venv/bin/uvicorn customer_service.app.app:app \
+            --host "$API_HOST" --port "$API_PORT" \
+            > /tmp/customer-service.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl --noproxy '*' -fsS "http://$API_HOST:$API_PORT/openapi.json" > /dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "customer-service failed to start"
+            cat /tmp/customer-service.log
+            exit 1
+          fi
+
+          .venv/bin/pytest tests -v
+
+      - name: Show customer-service log
+        if: failure()
+        run: cat /tmp/customer-service.log || true
