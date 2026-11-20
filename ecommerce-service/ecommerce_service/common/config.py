@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     ecom_database_url: str = (
-        "postgresql+psycopg://customer_service:customer_service@192.168.200.170:5432/ecommerce"
+        "postgresql+psycopg://customer_service:customer_service@127.0.0.1:5432/ecommerce"
     )
     jwt_secret: str = "replace-this-in-production"
     jwt_algorithm: str = "HS256"

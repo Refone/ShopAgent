@@ -131,7 +131,7 @@ def owned_order(db: Session, order_id: str, principal: Principal) -> Order:
     order = db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    if principal.role == "customer" and order.user_id != principal.user_id:
+    if principal.role == "user" and order.user_id != principal.user_id:
         raise HTTPException(status_code=403, detail="Order does not belong to current user")
     return order
 
@@ -172,9 +172,9 @@ def demo_token(request: DemoLoginRequest, db: Annotated[Session, Depends(get_db)
     expected_role = (
         "admin"
         if user.id.startswith("admin_")
-        else "agent"
+        else "staff"
         if user.id.startswith("agent_")
-        else "customer"
+        else "user"
     )
     if request.role != expected_role:
         raise HTTPException(status_code=403, detail="Role does not match demo account")
@@ -254,7 +254,7 @@ def list_orders(
     principal: Annotated[Principal, Depends(current_principal)],
 ):
     statement = select(Order)
-    if principal.role == "customer":
+    if principal.role == "user":
         statement = statement.where(Order.user_id == principal.user_id)
     orders = db.scalars(statement.order_by(Order.created_at.desc())).unique().all()
     return tool_result(True, "OK", f"找到 {len(orders)} 个订单", [order_payload(o) for o in orders])
@@ -401,7 +401,7 @@ def list_after_sales(
     order_id: str | None = None,
 ):
     statement = select(AfterSale)
-    if principal.role == "customer":
+    if principal.role == "user":
         statement = statement.where(AfterSale.user_id == principal.user_id)
     if order_id:
         statement = statement.where(AfterSale.order_id == order_id)
@@ -427,7 +427,7 @@ def list_after_sales(
 @app.get("/api/v1/admin/summary")
 def admin_summary(
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[Principal, Depends(require_roles("agent", "admin"))],
+    _: Annotated[Principal, Depends(require_roles("staff", "admin"))],
 ):
     return {
         "products": len(db.scalars(select(Product)).all()),
