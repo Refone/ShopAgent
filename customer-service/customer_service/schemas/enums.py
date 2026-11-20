@@ -1,0 +1,53 @@
+from enum import StrEnum
+
+
+class UserRole(StrEnum):
+    """
+    用户角色
+    """
+
+    USER = "user"
+    STAFF = "staff"
+    ADMIN = "admin"
+
+
+class MessageType(StrEnum):
+    """
+    消息类型
+    """
+
+    TEXT = "text"
+    OBJECT = "object"
+
+
+class ConversationMode(StrEnum):
+    """
+    会话模式
+    """
+
+    AI = "AI"
+    QUEUED = "QUEUED"
+    HUMAN = "HUMAN"
+    CLOSED = "CLOSED"
+
+
+class MessageRole(StrEnum):
+    """
+    消息角色
+    """
+
+    USER = "USER"
+    AI = "AI"
+    HUMAN = "HUMAN"
+
+
+class TurnStatus(StrEnum):
+    """
+    轮次状态
+    """
+
+    COLLECTING = "COLLECTING"  # 起始态
+    RUNNING = "RUNNING"  # 中间态
+    COMPLETED = "COMPLETED"  # 最终态
+    FAILED = "FAILED"  # 最终态
+    SUPERSED = "SUPERSED"  # 最终态

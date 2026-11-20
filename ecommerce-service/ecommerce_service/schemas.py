@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 class DemoLoginRequest(BaseModel):
     user_id: str = "user_001"
-    role: Literal["customer", "agent", "admin"] = "customer"
+    role: Literal["user", "staff", "admin"] = "user"
 
 
 class AddressUpdate(BaseModel):

@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@vitejs/plugin-vue": "latest",
+    "dompurify": "^3.4.15",
+    "marked": "^18.0.12",
     "vite": "latest",
     "vue": "latest"
   }
