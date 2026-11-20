@@ -1,6 +1,15 @@
 from enum import StrEnum
 
 
+class MessageType(StrEnum):
+    """
+    消息类型
+    """
+
+    TEXT = "text"
+    OBJECT = "object"
+
+
 class ConversationMode(StrEnum):
     """
     会话模式
