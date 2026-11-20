@@ -1,6 +1,16 @@
 from enum import StrEnum
 
 
+class UserRole(StrEnum):
+    """
+    用户角色
+    """
+
+    USER = "user"
+    STAFF = "staff"
+    ADMIN = "admin"
+
+
 class MessageType(StrEnum):
     """
     消息类型

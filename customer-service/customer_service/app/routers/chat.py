@@ -1,9 +1,10 @@
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from customer_service.app.dependencies import ChatServiceDep
+from customer_service.infra.auth import require_roles
 from customer_service.models.enums import MessageType
 
 chat_router = APIRouter(
@@ -27,7 +28,10 @@ class ChatMessageRequest(BaseModel):
     )
 
 
-@chat_router.post("/messages")
+@chat_router.post(
+    "/messages",
+    dependencies=[Depends(require_roles("user"))],
+)
 async def post_messages(
     payload: ChatMessageRequest,
     chat_service: ChatServiceDep,

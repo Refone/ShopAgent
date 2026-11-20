@@ -9,6 +9,7 @@ from customer_service.common.utils import get_uid, get_utcnow
 from customer_service.models.enums import (
     ConversationMode,
     HandoffStatus,
+    MessageType,
     TurnStatus,
 )
 
@@ -54,7 +55,7 @@ class Message(Base):
         ForeignKey("conversations.id"), index=True
     )
     role: Mapped[str] = mapped_column(String(20))
-    message_type: Mapped[str] = mapped_column(String(20), default="text")
+    message_type: Mapped[str] = mapped_column(String(20), default=MessageType.TEXT)
     content: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=get_utcnow

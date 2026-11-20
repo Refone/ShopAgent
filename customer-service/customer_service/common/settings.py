@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     pgsql_db: str = Field("customer_service", description="PgSQL数据库的数据库名")
 
     jwt_secret: str = Field("ecommerce-secret", description="jwt秘钥")
+    jwt_algorithm: list[str] = Field(["HS256"], description="jwt加密以及解密的算法")
 
-    jwt_algorithm: str = Field("HS256", description="jwt加密以及解密的算法")
     api_host: str = Field("0.0.0.0", description="服务的访问域名")
     api_port: int = Field(8000, description="服务的访问端口")
     cors_origins: list[str] = Field(
