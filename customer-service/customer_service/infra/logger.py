@@ -3,13 +3,14 @@ import logging
 # ANSI 颜色定义
 COLORS = {
     "DEBUG": "\033[37m",  # 灰色
-    "INFO": "\033[32m",  # 绿色
-    "WARNING": "\033[33m",  # 黄色
+    "INFO": "\033[34m",  # 蓝色
+    "WARNING": "\033[38;5;208m",  # 橙色
     "ERROR": "\033[31m",  # 红色
     "CRITICAL": "\033[1;31m",  # 红色加粗
 }
 
 RESET = "\033[0m"
+YELLOW = "\033[33m"
 
 
 class ColorFormatter(logging.Formatter):
@@ -32,7 +33,7 @@ def setup_logger(level=logging.DEBUG):
     handler.setFormatter(
         ColorFormatter(
             fmt=(
-                "%(asctime)s | "
+                f"{YELLOW}%(asctime)s{RESET} | "
                 "%(levelname)-17s | "
                 "%(filename)s:%(lineno)d | "
                 "%(funcName)s() | "

@@ -1,14 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from customer_service.common.settings import get_settings
 from customer_service.common.utils import get_uid, get_utcnow
-from customer_service.models.enums import (
+from customer_service.schemas.enums import (
     ConversationMode,
-    HandoffStatus,
     MessageType,
     TurnStatus,
 )
@@ -44,6 +44,19 @@ class Conversation(Base):
     last_active_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=get_utcnow, onupdate=get_utcnow
     )
+
+    def update_last_active(self) -> None:
+        self.last_active_at = get_utcnow()
+
+    def is_expired(
+        self,
+        expiration_seconds: int = get_settings().conversation_idle_timeout_seconds,
+    ) -> bool:
+        expiration_time = self.last_active_at + timedelta(seconds=expiration_seconds)
+        return get_utcnow() > expiration_time
+
+    def close(self) -> None:
+        self.mode = ConversationMode.CLOSED
 
 
 class Message(Base):
@@ -108,34 +121,4 @@ class RealtimeEvent(Base):
     )
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True
-    )
-
-
-class Handoff(Base):
-    """记录一次人工客服工单及其处理状态。"""
-
-    __tablename__ = "handoffs"
-    __table_args__ = (
-        Index(
-            "uq_open_handoff_per_conversation",
-            "conversation_id",
-            unique=True,
-            postgresql_where=text("status IN ('WAITING', 'ACTIVE')"),
-        ),
-    )
-
-    id: Mapped[str] = mapped_column(
-        String(80), primary_key=True, default=lambda: get_uid("handoff")
-    )
-    conversation_id: Mapped[str] = mapped_column(
-        ForeignKey("conversations.id"), index=True
-    )
-    user_id: Mapped[str] = mapped_column(String(40), index=True)
-    summary: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(
-        String(20), default=HandoffStatus.WAITING, index=True
-    )
-    staff_id: Mapped[str | None] = mapped_column(String(40), index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=get_utcnow
     )

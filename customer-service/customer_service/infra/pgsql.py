@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import (
 
 from customer_service.common.settings import get_settings
 from customer_service.infra.logger import LOG
-from customer_service.models.pgsql import Base
+from customer_service.schemas.entities import Base
 
 async_engine: AsyncEngine = create_async_engine(
     get_settings().pgsql_url,

@@ -6,7 +6,7 @@ from fastapi import Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from customer_service.common.settings import get_settings
-from customer_service.models.enums import UserRole
+from customer_service.schemas.enums import UserRole
 
 
 class CurrentUser(BaseModel):

@@ -51,13 +51,3 @@ class TurnStatus(StrEnum):
     COMPLETED = "COMPLETED"  # 最终态
     FAILED = "FAILED"  # 最终态
     SUPERSED = "SUPERSED"  # 最终态
-
-
-class HandoffStatus(StrEnum):
-    """
-    工单状态
-    """
-
-    WAITING = "WAITING"  # 有效(客服暂未接入)
-    ACTIVE = "ACTIVE"  # 有效(客服已经接入)
-    RESOLVED = "RESOLVED"  # 无效(客服关闭工单)
