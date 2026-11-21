@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 
@@ -14,13 +14,28 @@ chat_router = APIRouter(
 
 @chat_router.post(
     "/messages",
+    summary="用户发送消息",
 )
 async def post_messages(
     payload: ChatMessageRequest,
     chat_service: ChatServiceDep,
-    role: Annotated[CurrentUser, Depends(require_roles("user"))],
+    user: Annotated[CurrentUser, Depends(require_roles("user"))],
 ):
 
-    result = await chat_service.accept_message(role.user_id, payload)
+    result = await chat_service.accept_message(user.user_id, payload)
+
+    return result
+
+
+@chat_router.get(
+    "/history",
+    summary="获取历史消息",
+)
+async def get_history(
+    chat_service: ChatServiceDep,
+    user: Annotated[CurrentUser, Depends(require_roles("user"))],
+) -> dict[str, Any]:
+
+    result = await chat_service.get_history(user.user_id)
 
     return result

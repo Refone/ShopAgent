@@ -1,4 +1,5 @@
 from datetime import timedelta
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,7 +48,7 @@ class ChatService:
         LOG.info("Ensured conversation %s", conversation)
 
         # 创建消息实体
-        message = Message(
+        new_message = Message(
             message_id=payload.message_id,
             conversation_id=conversation.id,
             role=MessageRole.USER,
@@ -55,7 +56,7 @@ class ChatService:
             content=payload.content,
         )
 
-        self._db.add(message)
+        self._db.add(new_message)
         conversation.update_last_active()
 
         # 根据会话模式分流处理
@@ -71,7 +72,7 @@ class ChatService:
                 pass
 
         await self._db.commit()
-        LOG.info("Committed message %s to the database", message)
+        LOG.info("Committed message %s to the database", new_message)
 
         return payload
 
@@ -81,7 +82,7 @@ class ChatService:
         确保会话存在，如果不存在则创建
         """
 
-        db_query = await self._db.execute(
+        result = await self._db.execute(
             select(Conversation)
             .where(
                 Conversation.user_id == user_id,
@@ -91,7 +92,7 @@ class ChatService:
             .with_for_update(of=Conversation)  # 锁定会话行，防止并发创建重复会话
         )
 
-        conversation = db_query.scalar_one_or_none()
+        conversation = result.scalar_one_or_none()
 
         if conversation:
             if conversation.mode == ConversationMode.AI and conversation.is_expired():
@@ -116,7 +117,7 @@ class ChatService:
         """
 
         # 先查询是否存在正在 COLLECTING 状态的轮次
-        db_query = await self._db.execute(
+        result = await self._db.execute(
             select(ConversationTurn)
             .where(
                 ConversationTurn.conversation_id == conversation_id,
@@ -125,7 +126,7 @@ class ChatService:
             .with_for_update(of=ConversationTurn)
         )
 
-        turn = db_query.scalar_one_or_none()
+        turn = result.scalar_one_or_none()
 
         if turn:
             return turn
@@ -142,3 +143,33 @@ class ChatService:
         await self._db.flush()  # 因为需要用到 turn 的 id
 
         return turn
+
+    async def get_history(self, user_id: str) -> dict[str, Any]:
+        """
+        获取用户的历史消息，包括活跃会话、关闭会话
+        """
+
+        # 查询用户的所有消息
+        result = await self._db.execute(
+            select(
+                Message.conversation_id,
+                Message.role,
+                Message.content,
+                Message.created_at,
+            )
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(Conversation.user_id == user_id)
+            .order_by(Message.created_at.desc())
+        )
+
+        all_messages = [dict(row) for row in result.mappings().all()]
+
+        conversation = await self._ensure_conversation(user_id)
+
+        await self._db.commit()
+
+        return {
+            "conversation_id": conversation.id,  # 当前会话 ID，用于区分历史消息和当前会话消息
+            "conversation_mode": conversation.mode,  # 当前会话模式，用于前端展示标签
+            "messages": all_messages,
+        }
