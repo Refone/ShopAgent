@@ -1,11 +1,19 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated, Literal
 from urllib.parse import quote
 
-from pydantic import Field, computed_field
+from pydantic import BeforeValidator, Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+ENV_FILE = PROJECT_ROOT / ".env"
+DEFAULT_LOG_DIR = PROJECT_ROOT / "var" / "logs" / "customer-service"
+
+LogLevel = Annotated[
+    Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    BeforeValidator(lambda value: str(value).strip().upper()),
+]
 
 
 class Settings(BaseSettings):
@@ -51,6 +59,30 @@ class Settings(BaseSettings):
 
     # Turn Worker Settings
     turn_worker_pull_interval_ms: int = Field(2000, description="Turn Worker 轮询间隔")
+
+    # Logging
+    customer_service_log_dir: str = Field(
+        "",
+        description="日志文件输出目录，相对路径基于项目顶层目录；默认 var/logs/customer-service",
+    )
+    customer_service_log_file_level: LogLevel = Field(
+        "DEBUG", description="写入文件的日志级别阈值"
+    )
+    customer_service_log_console_level: LogLevel = Field(
+        "INFO", description="控制台（串口）输出的日志级别阈值"
+    )
+    customer_service_log_retention_days: int = Field(
+        3, ge=1, description="日志文件保留天数"
+    )
+
+    @property
+    def log_dir(self) -> Path:
+        """日志文件输出目录，未配置时使用项目顶层目录下的默认路径。"""
+        configured = self.customer_service_log_dir.strip()
+        directory = Path(configured).expanduser() if configured else DEFAULT_LOG_DIR
+        if not directory.is_absolute():
+            directory = PROJECT_ROOT / directory
+        return directory
 
     @computed_field(description="PostgreSQL数据库的地址")
     @property
