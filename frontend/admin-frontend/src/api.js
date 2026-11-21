@@ -1,9 +1,17 @@
-export const CUSTOMER_SERVICE_URL =
-  import.meta.env.VITE_CUSTOMER_SERVICE_URL || "http://127.0.0.1:8000";
-export const ECOMMERCE_SERVICE_URL =
-  import.meta.env.VITE_ECOMMERCE_SERVICE_URL || "http://127.0.0.1:8001";
-export const AI_SERVICE_URL =
-  import.meta.env.VITE_AI_SERVICE_URL || "http://127.0.0.1:8002";
+const serviceUrl = (host, port) => `http://${host}:${port}`;
+
+export const CUSTOMER_SERVICE_URL = serviceUrl(
+  import.meta.env.CUSTOMER_SERVICE_HOST || "127.0.0.1",
+  import.meta.env.CUSTOMER_SERVICE_PORT || "18000",
+);
+export const ECOMMERCE_SERVICE_URL = serviceUrl(
+  import.meta.env.ECOMMERCE_SERVICE_HOST || "127.0.0.1",
+  import.meta.env.ECOMMERCE_SERVICE_PORT || "18001",
+);
+export const AI_SERVICE_URL = serviceUrl(
+  import.meta.env.AI_SERVICE_HOST || "127.0.0.1",
+  import.meta.env.AI_SERVICE_PORT || "18002",
+);
 
 async function parseResponse(response) {
   if (response.status === 204) return null;
