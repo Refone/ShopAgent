@@ -5,26 +5,32 @@ from urllib.parse import quote
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
 
     # PostgreSQL
-    pgsql_host: str = Field("127.0.0.1", description="PgSQL数据库的主机地址")
-    pgsql_port: int = Field(5432, description="PgSQL数据库的端口")
-    pgsql_user: str = Field("customer_service", description="PgSQL数据库的用户名")
-    pgsql_password: str = Field("customer_service", description="PgSQL数据库的密码")
-    pgsql_db: str = Field("customer_service", description="PgSQL数据库的数据库名")
+    postgres_host: str = Field("127.0.0.1", description="PostgreSQL数据库的主机地址")
+    postgres_port: int = Field(5432, description="PostgreSQL数据库的端口")
+    postgres_user: str = Field(
+        "customer_service", description="PostgreSQL数据库的用户名"
+    )
+    postgres_password: str = Field(
+        "customer_service", description="PostgreSQL数据库的密码"
+    )
+    customer_service_db: str = Field(
+        "customer_service", description="customer-service 使用的数据库名"
+    )
 
     # JWT
     jwt_secret: str = Field("ecommerce-secret", description="jwt秘钥")
-    jwt_algorithm: list[str] = Field(["HS256"], description="jwt加密以及解密的算法")
+    jwt_algorithm: str = Field("HS256", description="jwt加密以及解密的算法")
 
     # FastAPI
-    api_host: str = Field("0.0.0.0", description="服务的访问域名")
-    api_port: int = Field(8000, description="服务的访问端口")
+    customer_service_host: str = Field("0.0.0.0", description="服务的监听地址")
+    customer_service_port: int = Field(8000, description="服务的监听端口")
     cors_origins: list[str] = Field(
         [
             "http://localhost:5173",
@@ -46,19 +52,19 @@ class Settings(BaseSettings):
     # Turn Worker Settings
     turn_worker_pull_interval_ms: int = Field(2000, description="Turn Worker 轮询间隔")
 
-    @computed_field(description="PgSQL数据库的地址")
+    @computed_field(description="PostgreSQL数据库的地址")
     @property
-    def pgsql_url(self) -> str:
-        user = quote(self.pgsql_user, safe="")
-        password = quote(self.pgsql_password, safe="")
-        database = quote(self.pgsql_db, safe="")
-        host = self.pgsql_host
+    def postgres_url(self) -> str:
+        user = quote(self.postgres_user, safe="")
+        password = quote(self.postgres_password, safe="")
+        database = quote(self.customer_service_db, safe="")
+        host = self.postgres_host
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
 
         return (
             f"postgresql+psycopg://{user}:{password}"
-            f"@{host}:{self.pgsql_port}/{database}"
+            f"@{host}:{self.postgres_port}/{database}"
         )
 
 
@@ -70,4 +76,4 @@ def get_settings() -> Settings:
 if __name__ == "__main__":
     settings = get_settings()
 
-    print(settings.pgsql_url)
+    print(settings.postgres_url)

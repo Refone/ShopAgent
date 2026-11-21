@@ -40,12 +40,10 @@ jobs:
           --health-retries 10
 
     env:
-      DATABASE_URL: postgresql+psycopg://customer_service:customer_service@127.0.0.1:5432/customer_service
-      REDIS_URL: redis://127.0.0.1:6379/0
       JWT_SECRET: ecommerce-secret
-      JWT_ALGORITHM: '["HS256"]'
-      API_HOST: 127.0.0.1
-      API_PORT: 18000
+      JWT_ALGORITHM: HS256
+      CUSTOMER_SERVICE_HOST: 127.0.0.1
+      CUSTOMER_SERVICE_PORT: 18000
       CORS_ORIGINS: '["http://127.0.0.1:5173"]'
 
     steps:
@@ -71,14 +69,14 @@ jobs:
           set -euo pipefail
 
           .venv/bin/uvicorn customer_service.app.app:app \
-            --host "$API_HOST" --port "$API_PORT" \
+            --host "$CUSTOMER_SERVICE_HOST" --port "$CUSTOMER_SERVICE_PORT" \
             > /tmp/customer-service.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 
           ready=0
           for _ in $(seq 1 30); do
-            if curl --noproxy '*' -fsS "http://$API_HOST:$API_PORT/openapi.json" > /dev/null 2>&1; then
+            if curl --noproxy '*' -fsS "http://$CUSTOMER_SERVICE_HOST:$CUSTOMER_SERVICE_PORT/openapi.json" > /dev/null 2>&1; then
               ready=1
               break
             fi

@@ -1,3 +1,5 @@
+# 环境变量统一放在 ShopAgent 顶层 .env，启动时需显式指定：
+# docker compose --env-file ../.env up -d --build
 name: ecommerce-customer-service
 
 services:
@@ -7,7 +9,7 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-customer_service}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-customer_service}
-      POSTGRES_DB: ${POSTGRES_DB:-ecommerce}
+      POSTGRES_DB: ${ECOMMERCE_SERVICE_DB:-ecommerce}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -17,7 +19,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-customer_service} -d ${POSTGRES_DB:-ecommerce}",
+          "pg_isready -U ${POSTGRES_USER:-customer_service} -d ${ECOMMERCE_SERVICE_DB:-ecommerce}",
         ]
       interval: 5s
       timeout: 5s
@@ -41,14 +43,18 @@ services:
     build: .
     container_name: ecommerce-app
     ports:
-      - "${APP_PORT:-8001}:8001"
+      - "${ECOMMERCE_SERVICE_PORT:-8001}:8001"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      ECOM_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-customer_service}:${POSTGRES_PASSWORD:-customer_service}@postgres:5432/${POSTGRES_DB:-ecommerce}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-customer_service}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-customer_service}
+      ECOMMERCE_SERVICE_DB: ${ECOMMERCE_SERVICE_DB:-ecommerce}
       JWT_SECRET: ${JWT_SECRET:-ecommerce-secret}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
     healthcheck:

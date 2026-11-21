@@ -43,7 +43,7 @@ def decode_access_token(access_token: str) -> CurrentUser:
     payload = jwt.decode(
         access_token,
         key=settings.jwt_secret,
-        algorithms=settings.jwt_algorithm,
+        algorithms=[settings.jwt_algorithm],
     )
 
     return CurrentUser.model_validate(payload)

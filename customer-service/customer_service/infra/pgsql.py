@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import (
 from customer_service.common.settings import get_settings
 
 POSTGRESQL_ENGINE: AsyncEngine = create_async_engine(
-    get_settings().pgsql_url,
+    get_settings().postgres_url,
     echo=False,
 )
 

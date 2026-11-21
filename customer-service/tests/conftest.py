@@ -57,10 +57,10 @@ def api_base_url(settings: Settings) -> str:
     if override:
         return override.rstrip("/")
 
-    host = settings.api_host
+    host = settings.customer_service_host
     if host in {"0.0.0.0", "::", ""}:
         host = "127.0.0.1"
-    return f"http://{host}:{settings.api_port}"
+    return f"http://{host}:{settings.customer_service_port}"
 
 
 @pytest.fixture(scope="session")
@@ -82,13 +82,13 @@ def api_client(api_base_url: str) -> Iterator[httpx.Client]:
 
 @pytest.fixture(scope="session")
 def db_engine(settings: Settings) -> Iterator[Engine]:
-    engine = create_engine(settings.pgsql_url, pool_pre_ping=True)
+    engine = create_engine(settings.postgres_url, pool_pre_ping=True)
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001
         engine.dispose()
-        pytest.fail(f"无法连接 PostgreSQL（{settings.pgsql_url}）：{exc}")
+        pytest.fail(f"无法连接 PostgreSQL（{settings.postgres_url}）：{exc}")
 
     yield engine
     engine.dispose()
@@ -117,6 +117,6 @@ def customer_headers(settings: Settings, chat_user: str) -> dict[str, str]:
                 "exp": now + timedelta(minutes=10),
             },
             settings.jwt_secret,
-            algorithm=settings.jwt_algorithm[0],
+            algorithm=settings.jwt_algorithm,
         )
     return {"Authorization": f"Bearer {token}"}
