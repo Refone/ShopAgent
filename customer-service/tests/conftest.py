@@ -19,14 +19,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from customer_service.common.config import Settings, get_settings
+from customer_service.common.settings import Settings, get_settings
 
 
 def _delete_chat_user_data(engine: Engine, user_id: str) -> None:
     """删除测试用户产生的会话及其从属记录，避免污染开发库。"""
     params = {"user_id": user_id}
     with engine.begin() as connection:
-        for table in ("messages", "conversation_turns", "realtime_outbox"):
+        for table in ("conversation_turns", "messages"):
             connection.execute(
                 text(
                     f"DELETE FROM {table} "
@@ -36,6 +36,10 @@ def _delete_chat_user_data(engine: Engine, user_id: str) -> None:
                 ),
                 params,
             )
+        connection.execute(
+            text("DELETE FROM realtime_events WHERE target = :user_id"),
+            params,
+        )
         connection.execute(
             text("DELETE FROM conversations WHERE user_id = :user_id"),
             params,
@@ -78,13 +82,13 @@ def api_client(api_base_url: str) -> Iterator[httpx.Client]:
 
 @pytest.fixture(scope="session")
 def db_engine(settings: Settings) -> Iterator[Engine]:
-    engine = create_engine(settings.database_url, pool_pre_ping=True)
+    engine = create_engine(settings.pgsql_url, pool_pre_ping=True)
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001
         engine.dispose()
-        pytest.fail(f"无法连接 PostgreSQL（{settings.database_url}）：{exc}")
+        pytest.fail(f"无法连接 PostgreSQL（{settings.pgsql_url}）：{exc}")
 
     yield engine
     engine.dispose()
@@ -108,11 +112,11 @@ def customer_headers(settings: Settings, chat_user: str) -> dict[str, str]:
         token = jwt.encode(
             {
                 "user_id": chat_user,
-                "role": "customer",
+                "role": "user",
                 "iat": now,
                 "exp": now + timedelta(minutes=10),
             },
             settings.jwt_secret,
-            algorithm=settings.jwt_algorithm,
+            algorithm=settings.jwt_algorithm[0],
         )
     return {"Authorization": f"Bearer {token}"}

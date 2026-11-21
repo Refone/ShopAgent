@@ -10,7 +10,7 @@ from ecommerce_service.common.config import get_settings
 
 class Principal(BaseModel):
     user_id: str
-    role: Literal["customer", "agent", "admin"] = "customer"
+    role: Literal["user", "staff", "admin"] = "user"
 
 
 def create_access_token(principal: Principal, expires_hours: int = 24) -> str:

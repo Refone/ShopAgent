@@ -1,4 +1,6 @@
 <script setup>
+import DOMPurify from "dompurify";
+import { marked } from "marked";
 import {
   computed,
   nextTick,
@@ -16,6 +18,8 @@ import {
   login,
   newId,
 } from "./api";
+
+marked.setOptions({ gfm: true, breaks: true });
 
 const mallProductIds = new Set([
   "PRODUCT_001",
@@ -40,6 +44,8 @@ const order = ref(null);
 const logistics = ref(null);
 const afterSales = ref([]);
 const messages = ref([]);
+const historyMessages = ref([]);
+const expandedConversationIds = ref(new Set());
 const conversationId = ref(null);
 const conversationMode = ref("BOT");
 const draft = ref("");
@@ -77,9 +83,29 @@ const canApplyAfterSale = computed(
 const serviceLabel = computed(() =>
   conversationModeLabel(conversationMode.value),
 );
+const historyGroups = computed(() => {
+  const groups = new Map();
+  for (const message of historyMessages.value) {
+    if (!groups.has(message.conversation_id)) {
+      groups.set(message.conversation_id, {
+        id: message.conversation_id,
+        messages: [],
+      });
+    }
+    groups.get(message.conversation_id).messages.push(message);
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      title: messageText(group.messages[0]),
+      preview: messageText(group.messages[group.messages.length - 1]),
+    }))
+    .reverse();
+});
 const pageTitle = computed(() => {
   if (path.value === "/mall") return "商城";
   if (path.value === "/chat" || path.value === "/") return "智能客服";
+  if (path.value === "/history") return "历史会话";
   if (path.value === "/me") return "我的";
   if (operation.value === "cancel") return "取消订单";
   if (operation.value === "address") return "修改收货地址";
@@ -110,6 +136,11 @@ function unwrap(result) {
   return result.data;
 }
 
+function unwrapAfterSales(result) {
+  if (result.code === "AFTER_SALE_NOT_FOUND") return [];
+  return unwrap(result);
+}
+
 function messageText(message) {
   const content = message.content || {};
   if (content.text) return content.text;
@@ -121,25 +152,21 @@ function messageText(message) {
   return "暂不支持的消息";
 }
 
-function upsertMessage(collection, message) {
-  const key =
-    message.message_id ||
-    `${message.agent_run_id || ""}:${message.agent_outcome_seq || ""}:${message.sequence || ""}`;
-  const index = collection.findIndex((item) => {
-    const itemKey =
-      item.message_id ||
-      `${item.agent_run_id || ""}:${item.agent_outcome_seq || ""}:${item.sequence || ""}`;
-    return itemKey === key;
+function messageHtml(message) {
+  return DOMPurify.sanitize(marked.parse(messageText(message)), {
+    USE_PROFILES: { html: true },
   });
-  if (index >= 0) {
-    collection[index] = message;
-  } else {
-    collection.push(message);
-  }
+}
+
+function toggleHistoryGroup(conversationId) {
+  const next = new Set(expandedConversationIds.value);
+  if (next.has(conversationId)) next.delete(conversationId);
+  else next.add(conversationId);
+  expandedConversationIds.value = next;
 }
 
 function appendMessage(message) {
-  upsertMessage(messages.value, message);
+  messages.value.push(message);
   nextTick(() =>
     messageList.value?.scrollTo({
       top: messageList.value.scrollHeight,
@@ -159,36 +186,23 @@ function updateAiProcessing(state = "idle", message = "") {
   );
 }
 
-function handleRealtimeEvent(event) {
-  const message = event.data?.message;
-  if (message && event.type === "message_created") {
-    appendMessage(message);
-    if (message.role === "ai") updateAiProcessing();
-  }
+function handleRealtimeEvent(message) {
+  if (!message || !message.content) return;
 
-  if (event.type === "ai_processing_started") {
-    updateAiProcessing("active", event.data?.message || "AI 正在处理你的问题");
+  if (message.conversation_mode) {
+    conversationMode.value = message.conversation_mode;
   }
-  if (event.type === "ai_processing_completed") updateAiProcessing();
-  if (event.type === "ai_processing_failed") {
-    updateAiProcessing(
-      "failed",
-      event.data?.message || "AI 处理失败，请稍后重试",
-    );
+  appendMessage(message);
+  if (path.value === "/history") {
+    loadHistory().catch((cause) => {
+      error.value = `历史会话刷新失败：${cause.message}`;
+    });
   }
-
-  if (event.type === "handoff_requested") {
+  if (message.role === "AI" && message.content?.kind === "error") {
+    updateAiProcessing("failed", messageText(message));
+  } else {
     updateAiProcessing();
-    conversationMode.value = "QUEUED";
   }
-  if (event.type === "handoff_accepted") conversationMode.value = "HUMAN";
-  if (event.type === "handoff_resolved") conversationMode.value = "AI";
-  if (
-    ["handoff_requested", "handoff_accepted", "handoff_resolved"].includes(
-      event.type,
-    )
-  )
-    loadHistory();
 }
 
 async function establishSession() {
@@ -206,13 +220,6 @@ async function establishSession() {
       onState: (state) => {
         chatState.value = state;
       },
-      onConnected: ({ reconnected }) => {
-        if (reconnected) {
-          syncMissedMessages().catch((cause) => {
-            error.value = `增量消息同步失败：${cause.message}`;
-          });
-        }
-      },
       onEvent: handleRealtimeEvent,
     });
     await loadPage();
@@ -225,51 +232,27 @@ async function establishSession() {
 
 async function loadHistory() {
   if (!session.token) return;
-  const history = await customerApi.history(session.token);
-  messages.value = history.filter(
+  const data = await customerApi.history(session.token);
+  conversationId.value = data.conversation_id;
+  conversationMode.value = data.conversation_mode;
+  historyMessages.value = data.messages;
+  messages.value = data.messages.filter(
     (message) => message.conversation_id === conversationId.value,
   );
+  if (!expandedConversationIds.value.size && conversationId.value) {
+    expandedConversationIds.value = new Set([conversationId.value]);
+  }
   await nextTick();
   messageList.value?.scrollTo({ top: messageList.value.scrollHeight });
 }
 
-async function syncMissedMessages() {
-  if (!session.token || !conversationId.value) return;
-  const lastSequence = messages.value.reduce(
-    (latest, message) => Math.max(latest, message.sequence || 0),
-    0,
-  );
-  const history = await customerApi.history(session.token, lastSequence);
-  history
-    .filter((message) => message.conversation_id === conversationId.value)
-    .forEach((message) => upsertMessage(messages.value, message));
-}
-
-async function loadCurrentConversation() {
-  if (!session.token) return;
-  const current = await customerApi.currentConversation(session.token);
-  conversationId.value = current.id;
-  conversationMode.value = current.mode;
-  if (current.mode === "AI" && current.processing) {
-    updateAiProcessing("active", "AI 正在处理你的问题");
-  } else {
-    updateAiProcessing();
-  }
-}
-
 async function loadChat() {
-  const [currentResult] = await Promise.allSettled([loadCurrentConversation()]);
   const [historyResult, orderResult] = await Promise.allSettled([
     loadHistory(),
     commerceApi.orders(session.token),
   ]);
 
   const failures = [];
-  if (currentResult.status === "rejected") {
-    failures.push(
-      `当前会话加载失败：${currentResult.reason?.message || "未知错误"}`,
-    );
-  }
   if (historyResult.status === "rejected") {
     failures.push(
       `聊天记录加载失败：${historyResult.reason?.message || "未知错误"}`,
@@ -295,7 +278,7 @@ async function loadOrder() {
     commerceApi.afterSales(session.token, orderId.value),
   ]);
   order.value = unwrap(orderResult);
-  afterSales.value = unwrap(afterSaleResult);
+  afterSales.value = unwrapAfterSales(afterSaleResult);
   form.address = order.value.address || "";
   logistics.value = null;
   if (!operation.value) {
@@ -336,7 +319,8 @@ async function loadPage() {
           object_id: objectId,
         });
       }
-    } else if (path.value === "/me")
+    } else if (path.value === "/history") await loadHistory();
+    else if (path.value === "/me")
       orders.value = unwrap(await commerceApi.orders(session.token));
     else if (orderId.value) await loadOrder();
     else navigate("/mall");
@@ -348,30 +332,32 @@ async function loadPage() {
 }
 
 async function sendPayload(type, content) {
-  updateAiProcessing();
+  if (conversationMode.value === "AI") {
+    updateAiProcessing("active", "AI 正在处理你的问题");
+  } else {
+    updateAiProcessing();
+  }
   const optimistic = {
     message_id: newId("msg"),
-    role: "user",
+    role: "USER",
     type,
     content,
-    created_at: new Date().toISOString(),
     delivery_status: "sending",
   };
   appendMessage(optimistic);
   try {
-    const result = await customerApi.send(session.token, {
+    await customerApi.send(session.token, {
       message_id: optimistic.message_id,
       type,
       content,
     });
-    conversationId.value = result.conversation_id;
-    conversationMode.value = result.mode;
     const current = messages.value.find(
       (item) => item.message_id === optimistic.message_id,
     );
     if (current?.delivery_status === "sending")
       current.delivery_status = "sent";
   } catch (cause) {
+    updateAiProcessing();
     const current = messages.value.find(
       (item) => item.message_id === optimistic.message_id,
     );
@@ -458,7 +444,7 @@ async function runWrite(action, successMessage, target) {
 }
 
 function actionHref(message) {
-  return message.content?.action?.href;
+  return message.content?.page_action?.href;
 }
 
 function messageChoices(message) {
@@ -534,7 +520,7 @@ watch(route, loadPage);
   <div class="app-shell">
     <header class="topbar">
       <button class="brand" @click="navigate('/mall')">
-        <span>小满</span> 商城
+        <span>丰收里</span> 商城
       </button>
       <nav aria-label="主导航">
         <button
@@ -550,6 +536,13 @@ watch(route, loadPage);
           @click="navigate('/chat')"
         >
           客服
+        </button>
+        <button
+          :class="{ active: path === '/history' }"
+          :aria-current="path === '/history' ? 'page' : undefined"
+          @click="navigate('/history')"
+        >
+          历史
         </button>
         <button
           :class="{ active: path.startsWith('/me') }"
@@ -674,27 +667,34 @@ watch(route, loadPage);
                 </button>
                 <button
                   @click="
-                    draft = '如何申请售后？';
+                    draft = '我想了解平台售后规则';
                     sendMessage();
                   "
                 >
-                  如何申请售后？
+                  我想了解平台售后规则
                 </button>
               </div>
               <article
-                v-for="message in messages"
-                :key="message.message_id || message.sequence"
-                :class="['message', message.role]"
+                v-for="(message, index) in messages"
+                :key="index"
+                :class="['message', message.role.toLowerCase()]"
               >
                 <span class="avatar">{{
-                  message.role === "user"
+                  message.role === "USER"
                     ? "我"
-                    : message.role === "human"
+                    : message.role === "HUMAN"
                       ? "人"
                       : "AI"
                 }}</span>
                 <div class="bubble">
-                  <div class="message-text">{{ messageText(message) }}</div>
+                  <div v-if="message.role === 'USER'" class="message-text">
+                    {{ messageText(message) }}
+                  </div>
+                  <div
+                    v-else
+                    class="message-text markdown-body"
+                    v-html="messageHtml(message)"
+                  ></div>
                   <small
                     v-if="message.delivery_status === 'sending'"
                     class="delivery-state"
@@ -729,9 +729,9 @@ watch(route, loadPage);
                     @click="navigate(actionHref(message))"
                   >
                     <span
-                      ><strong>{{ message.content.action.label }}</strong
+                      ><strong>{{ message.content.page_action.label }}</strong
                       ><small>{{
-                        message.content.action.description
+                        message.content.page_action.description
                       }}</small></span
                     ><b>→</b>
                   </button>
@@ -769,6 +769,75 @@ watch(route, loadPage);
               />
               <button :disabled="!draft.trim()">发送</button>
             </form>
+          </div>
+        </section>
+      </template>
+
+      <template v-else-if="path === '/history'">
+        <section class="history-hero">
+          <div>
+            <p class="eyebrow">CONVERSATION ARCHIVE</p>
+            <h1>历史会话</h1>
+            <p>按照会话开始时间整理，展开即可回看当时的完整咨询记录。</p>
+          </div>
+          <span>{{ historyGroups.length }} 次会话</span>
+        </section>
+
+        <section class="history-list" aria-label="历史会话列表">
+          <article
+            v-for="(group, index) in historyGroups"
+            :key="group.id"
+            :class="[
+              'history-group',
+              { expanded: expandedConversationIds.has(group.id) },
+            ]"
+          >
+            <button
+              class="history-group-head"
+              :aria-expanded="expandedConversationIds.has(group.id)"
+              @click="toggleHistoryGroup(group.id)"
+            >
+              <span class="history-index">{{
+                String(index + 1).padStart(2, "0")
+              }}</span>
+              <span class="history-summary">
+                <span>
+                  <strong>{{ group.title }}</strong>
+                  <b v-if="group.id === conversationId">当前会话</b>
+                </span>
+                <small>{{ group.preview }}</small>
+              </span>
+              <span class="history-count"
+                >{{ group.messages.length }} 条 <b>⌄</b></span
+              >
+            </button>
+
+            <div
+              v-if="expandedConversationIds.has(group.id)"
+              class="history-transcript"
+            >
+              <article
+                v-for="(message, msgIndex) in group.messages"
+                :key="msgIndex"
+                :class="['history-message', message.role.toLowerCase()]"
+              >
+                <span>{{
+                  message.role === "USER"
+                    ? "我"
+                    : message.role === "HUMAN"
+                      ? "人工客服"
+                      : "AI 客服"
+                }}</span>
+                <div>
+                  <p>{{ messageText(message) }}</p>
+                </div>
+              </article>
+            </div>
+          </article>
+
+          <div v-if="!historyGroups.length" class="empty-state">
+            <h2>还没有历史会话</h2>
+            <p>完成第一次咨询后，会话记录会显示在这里。</p>
           </div>
         </section>
       </template>

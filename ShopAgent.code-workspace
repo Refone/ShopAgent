@@ -47,5 +47,12 @@
         "source.organizeImports.ruff": "explicit", // 整理 import 语句
       },
     },
+
+    "workbench.colorCustomizations": {
+      "titleBar.activeBackground": "#604040",
+      "titleBar.inactiveBackground": "#604040",
+      "statusBar.background": "#503030",
+      "statusBar.inactiveBackground": "#503030",
+    },
   },
 }
