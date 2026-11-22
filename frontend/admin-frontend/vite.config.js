@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import vue from "@vitejs/plugin-vue";
 
 const envDir = fileURLToPath(new URL("../..", import.meta.url));
@@ -10,9 +10,24 @@ const envPrefix = [
   "AI_SERVICE_",
 ];
 
-export default defineConfig({
-  plugins: [vue()],
-  envDir,
-  envPrefix,
-  server: { port: 5174, strictPort: true },
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, envDir, ["ADMIN_FRONTEND_"]);
+  const host = env.ADMIN_FRONTEND_HOST || "127.0.0.1";
+  const port = Number(env.ADMIN_FRONTEND_PORT || 18101);
+
+  return {
+    plugins: [vue()],
+    envDir,
+    envPrefix,
+    server: {
+      host,
+      port,
+      strictPort: true,
+    },
+    preview: {
+      host,
+      port,
+      strictPort: true,
+    },
+  };
 });
