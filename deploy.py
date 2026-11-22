@@ -691,6 +691,13 @@ def _signal_process(pid: int, sig: int) -> None:
 def _pid_gone(pid: int, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        # 同一个 TUI 启动的 preview 退出后可能还在等待父进程回收。
+        if os.name == "posix":
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    return True
+            except ChildProcessError:
+                pass
         if not _pid_alive(pid):
             return True
         time.sleep(0.2)
@@ -708,7 +715,8 @@ def _stop_process(name: str, marker: str | None = None) -> bool:
     if not _pid_gone(pid, 10.0):
         _warn(f"{name} 未在 10 秒内退出，发送 SIGKILL")
         _signal_process(pid, signal.SIGKILL)
-        _pid_gone(pid, 3.0)
+        if not _pid_gone(pid, 3.0):
+            raise DeployError(f"{name}（PID {pid}）未停止。")
     _remove_pid(name)
     _ok(f"{name} 已停止")
     return True
@@ -1448,12 +1456,16 @@ def _deploy_selected(values: Sequence[str], rebuild: bool = True) -> bool:
 
 
 @dataclass(frozen=True)
-class _Spec:
-    """Deploy 页的一行：一个可构建、部署、卸载的服务。"""
-
+class _Target:
     key: str
     name: str
     log_name: str
+
+
+@dataclass(frozen=True)
+class _Spec(_Target):
+    """Deploy 页的一行：一个可构建、部署、卸载的服务。"""
+
     kind: str  # ecommerce | customer | ai | frontend | infra
     service: str = ""  # compose 服务名
     frontend: _Frontend | None = None
@@ -1738,7 +1750,9 @@ def _uninstall_row(spec: _Spec, final: bool = False, volumes: bool = False) -> N
         if not _stop_process("customer-service", "customer_service.app.app"):
             _info("customer-service 未在运行")
     elif spec.frontend is not None:
-        if not _stop_process(spec.frontend.name, "vite"):
+        stopped = _stop_process(spec.frontend.name, "vite")
+        _ensure_port_free(spec.name, *_endpoint(spec))
+        if not stopped:
             _info(f"{spec.frontend.name} 未在运行")
     elif spec.kind in {"ecommerce", "infra"}:
         _prepare()
@@ -1778,6 +1792,12 @@ class _Item:
     state: str
     main: str
     sub: str = ""
+    target: _Target | None = None
+
+    @classmethod
+    def dependency(cls, key: str, state: str, name: str, detail: str = "") -> _Item:
+        key = f"env-{key}"
+        return cls(state, name, detail, _Target(key, name, key))
 
 
 @dataclass
@@ -1842,6 +1862,10 @@ def _probe_row(
         return info
 
     if info.listening:
+        if spec.frontend and _tracked_pid(spec.frontend.name, "vite") is None:
+            info.state = "failed"
+            info.url = f"Port {port} in use (not managed by this checkout)"
+            return info
         url = _http_url(host, port, _HEALTH_PATH[spec.key])
         info.state = "online" if _http_ok(url, timeout=1.5) else "failed"
         return info
@@ -1875,26 +1899,105 @@ def _tool_version(command: list[str]) -> str | None:
     return match.group(0) if match else ""
 
 
-def _probe_tools() -> list[_Item]:
-    items = [_Item("ready", "python", sys.version.split()[0])]
-    commands = (
-        ("docker", ["docker", "--version"]),
-        ("docker compose", ["docker", "compose", "version", "--short"]),
-        ("uv", ["uv", "--version"]),
-        ("node", ["node", "--version"]),
-        ("npm", ["npm", "--version"]),
+_TOOL_COMMANDS = {
+    "docker": ["docker", "--version"],
+    "docker compose": ["docker", "compose", "version", "--short"],
+    "uv": ["uv", "--version"],
+    "node": ["node", "--version"],
+    "npm": ["npm", "--version"],
+}
+
+
+def _probe_tool(label: str) -> _Item:
+    version = _tool_version(_TOOL_COMMANDS[label])
+    state, detail = "ready", version or ""
+    if version is None:
+        state, detail = "failed", "not found"
+    elif label == "node" and not (
+        version[:1].isdigit() and int(version.split(".")[0]) >= 18
+    ):
+        state, detail = "failed", f"{version} (needs >= 18)"
+    return _Item.dependency(label.replace(" ", "-"), state, label, detail)
+
+
+def _get_command(item: _Item) -> list[str]:
+    """返回确认框展示的原样命令；不执行 shell 或提升权限。"""
+
+    if item.target is None:
+        raise DeployError("Select a tool or image to get.")
+    if item.target.key == "env-image-app":
+        env_file = ENV_FILE if ENV_FILE.exists() else ENV_EXAMPLE
+        return [
+            "docker",
+            "compose",
+            "--env-file",
+            _rel(env_file),
+            "-f",
+            _rel(COMPOSE_FILE),
+            "build",
+            "app",
+        ]
+    if item.target.key.startswith("env-image-"):
+        return ["docker", "image", "pull", item.main]
+    if item.main == "docker daemon":
+        if sys.platform == "darwin":
+            return ["open", "-a", "Docker"]
+        if shutil.which("systemctl"):
+            return ["systemctl", "--no-ask-password", "start", "docker.service"]
+        raise DeployError("Start the Docker daemon manually, then check Environment.")
+
+    managers = (
+        ("brew", {"docker compose": "docker-compose", "npm": "node"}),
+        (
+            "apt-get",
+            {
+                "docker": "docker.io",
+                "docker compose": "docker-compose-v2",
+                "node": "nodejs",
+            },
+        ),
+        (
+            "dnf",
+            {
+                "docker": "moby-engine",
+                "docker compose": "docker-compose-plugin",
+                "node": "nodejs",
+            },
+        ),
     )
-    for label, command in commands:
-        version = _tool_version(command)
-        if version is None:
-            items.append(_Item("failed", label, "not found"))
-        elif label == "node" and not (
-            version[:1].isdigit() and int(version.split(".")[0]) >= 18
-        ):
-            items.append(_Item("failed", label, f"{version} (needs >= 18)"))
+    for manager, packages in managers:
+        if shutil.which(manager):
+            flags = [] if manager == "brew" else ["-y"]
+            return [manager, "install", *flags, packages.get(item.main, item.main)]
+    raise DeployError(
+        f"No supported package manager (brew/apt-get/dnf). Install {item.main} manually."
+    )
+
+
+def _get_dependency(item: _Item, command: list[str]) -> None:
+    _run(command, cwd=ROOT)
+    _check_cancel()
+    if item.main == "docker daemon":
+        # Docker Desktop 窗口打开后，引擎仍可能在启动中。
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            _check_cancel()
+            if _docker_info().ok:
+                break
+            time.sleep(1)
         else:
-            items.append(_Item("ready", label, version))
-    return items
+            raise DeployError(
+                "Docker daemon did not become ready; check Docker's status."
+            )
+    elif item.main in _TOOL_COMMANDS:
+        result = _probe_tool(item.main)
+        if result.state != "ready":
+            raise DeployError(
+                f"{item.main}: {result.sub}. Check your PATH or package version."
+            )
+    elif not _image_exists(item.main):
+        raise DeployError(f"Image not found after Get: {item.main}")
+    _ok(f"{item.main} ready")
 
 
 class _Monitor:
@@ -1903,6 +2006,7 @@ class _Monitor:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._wake = threading.Event()
+        self._tools_wake = threading.Event()
         self._stop = threading.Event()
         self._force = True
         self._reload_meta = True
@@ -1918,11 +2022,13 @@ class _Monitor:
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        self._tools_wake.set()
 
     def refresh(self, reload_meta: bool = False) -> None:
         self._force = True
         self._reload_meta = self._reload_meta or reload_meta
         self._wake.set()
+        self._tools_wake.set()
 
     def snapshot(
         self,
@@ -1973,10 +2079,12 @@ class _Monitor:
     def _tools_loop(self) -> None:
         _silence()
         while not self._stop.is_set():
-            tools = _probe_tools()
+            self._tools_wake.clear()
+            tools = [_Item("ready", "python", sys.version.split()[0])]
+            tools.extend(_probe_tool(label) for label in _TOOL_COMMANDS)
             with self._lock:
                 self._tools = tools
-            self._stop.wait(10.0)
+            self._tools_wake.wait(10.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1986,7 +2094,7 @@ class _Monitor:
 
 @dataclass(eq=False)
 class _Job:
-    spec: _Spec
+    spec: _Target
     title: str
     phase: str
     fn: Callable[[], None]
@@ -2030,7 +2138,6 @@ class _Runner:
         self._cond = threading.Condition()
         self._queue: list[_Job] = []
         self._current: _Job | None = None
-        self._last: _Job | None = None
         self._failed: dict[str, _Job] = {}
         self._failures: deque[_Job] = deque()
         self._closed = False
@@ -2064,10 +2171,6 @@ class _Runner:
         with self._cond:
             return self._current, len(self._queue)
 
-    def latest(self) -> _Job | None:
-        with self._cond:
-            return self._current or self._last
-
     def busy(self) -> bool:
         with self._cond:
             return self._current is not None or bool(self._queue)
@@ -2076,20 +2179,23 @@ class _Runner:
         with self._cond:
             return self._failures.popleft() if self._failures else None
 
-    def cancel_all(self) -> None:
+    def cancel(self, key: str | None = None) -> bool:
         with self._cond:
-            for job in self._queue:
+            pending = [job for job in self._queue if key is None or job.spec.key == key]
+            for job in pending:
                 job.state = "cancelled"
                 job.cancelled = True
-            self._queue.clear()
+                self._queue.remove(job)
             job = self._current
-            if job is not None:
+            if job is not None and (key is None or job.spec.key == key):
                 job.cancelled = True
                 if job.process is not None:
                     _kill_process_group(job.process)
+                return True
+            return bool(pending)
 
     def close(self, timeout: float = 5.0) -> None:
-        self.cancel_all()
+        self.cancel()
         with self._cond:
             self._closed = True
             self._cond.notify()
@@ -2110,7 +2216,6 @@ class _Runner:
 
             with self._cond:
                 self._current = None
-                self._last = job
                 if job.state == "failed":
                     self._failed[job.spec.key] = job
                     self._failures.append(job)
@@ -2271,18 +2376,17 @@ def _wrap_lines(lines: Sequence[str], width: int) -> list[str]:
 def _max_offset(text: str, width: int, ell: str = "…") -> int:
     """text 在 width 列内显示时，最大的起始字符偏移（尾部恰好放下）。"""
 
-    if _text_width(text) <= width:
-        return 0
-    room = width - _text_width(ell)
-    used = 0
-    index = len(text)
-    while index > 0:
-        cols = _char_width(text[index - 1])
-        if used + cols > room:
-            break
-        used += cols
-        index -= 1
-    return index
+    room = max(0, width - _text_width(ell))
+    used = offset = 0
+    for i in range(len(text) - 1, -1, -1):
+        used += _char_width(text[i])
+        if not offset and used > room:
+            offset = i + 1
+            while offset < len(text) and _char_width(text[offset]) == 0:
+                offset += 1
+        if used > width:
+            return offset
+    return 0
 
 
 def _window(
@@ -2292,10 +2396,9 @@ def _window(
 
     if width <= 0:
         return "", 0, 0, 0
-    if _text_width(text) <= width:
-        return text, 0, 0, 0
-
     max_offset = _max_offset(text, width, ell)
+    if not max_offset:
+        return text, 0, 0, 0
     offset = max(0, min(offset, max_offset))
     ell_cols = _text_width(ell)
     head = ell if offset > 0 else ""
@@ -2326,20 +2429,19 @@ def _fit(
     """把带属性的文本片段按 _window 规则裁剪，省略号使用 ell_attr。"""
 
     text = "".join(piece for piece, _ in segs)
-    attrs = [attr for piece, attr in segs for _ in piece]
     shown, offset, head, tail = _window(text, width, offset, ell)
-    body = shown[head : len(shown) - tail]
+    end = offset + len(shown) - head - tail
 
     out: list[tuple[str, int]] = []
     if head:
         out.append((shown[:head], ell_attr))
-    first = len(out)
-    for index, ch in enumerate(body):
-        attr = attrs[offset + index]
-        if len(out) > first and out[-1][1] == attr:
-            out[-1] = (out[-1][0] + ch, attr)
-        else:
-            out.append((ch, attr))
+    pos = 0
+    for piece, attr in segs:
+        if pos >= end:
+            break
+        if pos + len(piece) > offset:
+            out.append((piece[max(0, offset - pos) : end - pos], attr))
+        pos += len(piece)
     if tail:
         out.append((shown[len(shown) - tail :], ell_attr))
     return out, offset
@@ -2394,9 +2496,9 @@ class _Modal:
 class _LogView:
     """全屏日志查看器的状态。"""
 
-    def __init__(self, title: str, path: Path) -> None:
-        self.title = title
-        self.path = path
+    def __init__(self, target: _Target) -> None:
+        self.target = target
+        self.path = DEPLOY_LOG_DIR / f"{target.log_name}.log"
         self.lines: list[str] = []
         self.top = 0
         self.left = 0
@@ -2466,15 +2568,14 @@ class _Tui:
 
         self.sel = 0
         self.col = 0
-        self.hoff = 0
-        self.cells: list[list[list[tuple[str, int]]]] = []
-        self.geo: list[tuple[int, int]] = []
+        self.manual_offset: int | None = None
+        self.focus_span = (0, 0, 0)  # offset, limit, width
+        self.deploy_top = 0
+        self.marquee_since = time.monotonic()
 
         self.panel = 0
         self.psel = [0, 0, 0]
-        self.poff = 0
-        self.env_cells: list[list[list[tuple[str, int]]]] = [[], [], []]
-        self.env_widths = [1, 1, 1]
+        self.env_groups: tuple[list[_Item], ...] = ([], [], [])
 
         self.cfg_top = 0
         self.cfg_left = 0
@@ -2543,18 +2644,35 @@ class _Tui:
         x: int,
         width: int,
         segs: Sequence[tuple[str, int]],
-        offset: int = 0,
         extra: int = 0,
-    ) -> int:
-        """在固定宽度内绘制文本，过长时省略；extra 为附加属性（如反色）。"""
+        *,
+        marquee: bool = True,
+        offset: int | None = None,
+    ) -> tuple[int, int]:
+        """在固定宽度内绘制文本。跑马灯在首尾稍作停留，短文本保持静止。"""
 
-        parts, offset = _fit(segs, width, offset, self.a["gray"], self.sym["ell"])
+        if width <= 0:
+            return 0, 0
+        text = "".join(piece for piece, _ in segs)
+        ell = self.sym["ell"]
+        limit = _max_offset(text, width, ell)
+        parts = segs
+        if limit:
+            if offset is None:
+                step = (
+                    int((time.monotonic() - self.marquee_since) * 4) if marquee else 0
+                )
+                offset = max(0, step % (limit + 10) - 5)
+            offset = min(limit, offset)
+            while offset and offset < len(text) and _char_width(text[offset]) == 0:
+                offset += 1
+            parts, _ = _fit(segs, width, offset, self.a["gray"], ell)
         end = x
         for text, attr in parts:
             end = self.put(y, end, text, attr | extra)
         if extra and end < x + width:
             self.put(y, end, " " * (x + width - end), extra)
-        return offset
+        return (offset or 0) if limit else 0, limit
 
     def box(self, top: int, bottom: int) -> None:
         s = self.sym
@@ -2634,38 +2752,48 @@ class _Tui:
         x = 2
         for index, name in enumerate(self.TABS):
             base = a["rev"] if index == self.tab else 0
-            x = self.put(0, x, " ", base)
-            x = self.put(0, x, name[0], base | a["ul"])
-            x = self.put(0, x, name[1:] + " ", base) + 1
-        right = (("Tab", ": Switch Tabs", None), ("Q", ": Quit", None))
+            hot = 2 if index == self.DEPLOY else 0
+            x = self.put(0, x, " " + name[:hot], base)
+            x = self.put(0, x, name[hot], base | a["ul"])
+            x = self.put(0, x, name[hot + 1 :] + " ", base) + 1
+        tab_hint = ": Switch Tabs" if self.w >= 90 else ""
+        right = (
+            ("Arrow-keys", ": Navigation", None),
+            ("Tab", tab_hint, None),
+            ("Q", ": Quit", None),
+        )
         self._draw_options(0, (), right, floor=x)
 
     def _draw_page_options(self) -> None:
         y = self.h - 2
-        arrows = ("Arrow-keys", ": Navigation", None)
         if self.tab == self.CONFIG:
-            self._draw_options(y, (("Enter", ": Edit", None),), (arrows,))
+            self._draw_options(y, (("Enter", ": Edit", None),))
         elif self.tab == self.ENVIRONMENT:
-            self._draw_options(
-                y,
-                (
-                    ("WASD", ": Switch Panels", None),
-                    ("Arrow-keys", ": Navigation in Panel", None),
-                ),
-            )
+            options: list[_Option] = [
+                ("Left/Right", ": Panel", None),
+                ("Up/Down", ": Item", None),
+            ]
+            item = self._selected_dependency()
+            if item is not None and item.target is not None:
+                pending = self.runner.has_row(item.target.key)
+                if not pending and item.state in {"missing", "failed"}:
+                    options.append(("G", ": Get", None))
+                options.append(("L", ": Log", None))
+                if pending:
+                    options.append(("X", ": Cancel", None))
+            self._draw_options(y, options)
         else:
             self._draw_options(
                 y,
                 (
                     ("(re)Build", "", 4),
-                    ("(re)Deploy", "", 6),
+                    ("(re)Deploy", "", 4),
                     ("Uninstall", "", 0),
                     ("Deploy All", "", 7),
                     ("Uninstall All", "", 1),
                     ("Logs", "", 0),
                     ("X", ": Cancel", None),
                 ),
-                (arrows,),
             )
 
     def _draw_status(self) -> None:
@@ -2673,18 +2801,20 @@ class _Tui:
         a = self.a
         if self.flash_text and time.monotonic() < self.flash_until:
             attr = a["red"] if self.flash_error else a["yellow"]
-            self.put(y, 2, _clean(self.flash_text), attr)
+            self.cell(y, 2, self.w - 4, [(_clean(self.flash_text), attr)])
             return
         job, queued = self.runner.counts()
         if job is None and not queued:
             self.put(y, 2, "Idle", a["gray"])
             return
-        x = 2
+        parts = []
         if job is not None:
-            x = self.put(y, x, self._spin() + " ", a["yellow"])
-            x = self.put(y, x, f"{job.phase} {job.spec.name}")
+            parts.extend(
+                [(self._spin() + " ", a["yellow"]), (f"{job.phase} {job.spec.name}", 0)]
+            )
         if queued:
-            self.put(y, x, f"  {queued} queued", a["gray"])
+            parts.append((f"  {queued} queued", a["gray"]))
+        self.cell(y, 2, self.w - 4, parts)
 
     # -- Deploy 页 --------------------------------------------------------
 
@@ -2696,77 +2826,83 @@ class _Tui:
 
     def _row_view(
         self, spec: _Spec, info: _RowInfo, state: tuple[str, _Job] | None
-    ) -> tuple[str, int, list[tuple[str, int]]]:
+    ) -> tuple[str, int, str, int]:
         a, s = self.a, self.sym
         if state is not None:
             kind, job = state
             if kind == "running":
-                return self._spin(), a["yellow"], [(f"{job.phase}...", a["yellow"])]
+                return self._spin(), a["yellow"], f"{job.phase}...", a["yellow"]
             if kind == "queued":
-                return s["queued"], a["gray"], [("Queued...", a["gray"])]
-            first = (job.error.splitlines() or [""])[0]
-            return s["failed"], a["red"], [(f"Failed: {_clean(first)}", a["red"])]
+                return s["queued"], a["gray"], "Queued...", a["gray"]
+            return s["failed"], a["red"], f"Failed: {job.error}", a["red"]
         if spec.kind == "ai":
-            return s["missing"], a["gray"], [("Not implemented", a["gray"])]
+            return s["missing"], a["gray"], "Not implemented", a["gray"]
         attr = 0 if info.state == "online" else a["gray"]
-        icon = a[_STATE_COLOR[info.state]]
-        return s[info.state], icon, [(_clean(info.url), attr)]
+        icon = a["gray" if info.state == "ready" else _STATE_COLOR[info.state]]
+        return s[info.state], icon, _clean(info.url), attr
 
     def _draw_deploy(self, top: int, bottom: int) -> None:
         a = self.a
         rows, _docker, meta, _tools = self.monitor.snapshot()
         view = self.runner.view()
-        self.geo = self._geometry()
+        geo = self._geometry()
 
         self.put(top + 1, 2, "Status", a["yellow"])
-        for (x, _width), title in zip(self.geo, ("Service Name", "URL", "Docker")):
+        for (x, _width), title in zip(geo, ("Service Name", "URL", "Docker")):
             self.put(top + 1, x, title, a["yellow"])
         self.divider(top + 2)
 
         self.sel = max(0, min(self.sel, len(_SPECS) - 1))
-        self.cells = []
+        detail_x = geo[1][0]
+        detail_width = self.w - 2 - detail_x
+        lines = []
+        selected_start = selected_end = 0
         for index, spec in enumerate(_SPECS):
-            y = top + 3 + index
-            icon, icon_attr, url = self._row_view(
-                spec, rows.get(spec.key, _RowInfo()), view.get(spec.key)
+            info = rows.get(spec.key, _RowInfo())
+            state = view.get(spec.key)
+            icon, icon_attr, text, attr = self._row_view(spec, info, state)
+            merged = (
+                spec.kind == "ai" or (state[0] if state else info.state) == "failed"
             )
+            start = len(lines)
+            details = (
+                _wrap_lines(text.splitlines() or [""], detail_width)
+                if merged
+                else [text]
+            )
+            for n, line in enumerate(details):
+                cells = [
+                    (geo[0], spec.name if n == 0 else "", 0),
+                    ((detail_x, detail_width) if merged else geo[1], line, attr),
+                ]
+                if not merged:
+                    cells.append((geo[2], _docker_text(spec, meta), a["gray"]))
+                lines.append((index, icon if n == 0 else "", icon_attr, cells))
+            if index == self.sel:
+                selected_start, selected_end = start, len(lines)
+                self.col = min(self.col, len(cells) - 1)
+
+        height = bottom - top - 3
+        self.deploy_top = max(0, min(self.deploy_top, len(lines) - height))
+        self.deploy_top = min(
+            selected_start, max(self.deploy_top, selected_end - height)
+        )
+        for y, (index, icon, icon_attr, cells) in enumerate(
+            lines[self.deploy_top : self.deploy_top + height], top + 3
+        ):
             self.put(y, 4, icon, icon_attr)
-            docker_text = _docker_text(spec, meta)
-            cells = [
-                [(spec.name, 0)],
-                url,
-                [(docker_text, a["gray"])] if docker_text else [],
-            ]
-            self.cells.append(cells)
-            for col, ((x, width), segs) in enumerate(zip(self.geo, cells)):
+            for col, ((x, width), text, attr) in enumerate(cells):
                 focused = index == self.sel and col == self.col
-                offset = self.cell(
+                offset, limit = self.cell(
                     y,
                     x,
                     width,
-                    segs,
-                    self.hoff if focused else 0,
+                    [(text, attr)],
                     a["rev"] if focused else 0,
+                    offset=self.manual_offset if focused else None,
                 )
                 if focused:
-                    self.hoff = offset
-
-        pane = top + 3 + len(_SPECS)
-        height = bottom - pane - 1
-        if height < 3:
-            return
-        job = self.runner.latest()
-        title = "Output"
-        if job is not None:
-            title = f"Output - {job.spec.name} - {job.title} ({job.state})"
-        self.divider(pane)
-        self.put(pane, 3, f" {title} ", a["yellow"])
-        lines = _tail_lines(job, height) if job is not None else []
-        if not lines:
-            self.put(pane + 1, 2, "No task output yet.", a["gray"])
-        for index, line in enumerate(lines):
-            text = _clip_cols(_clean(line), self.w - 4)
-            self.put(pane + 1 + index, 2, text, self._log_attr(line))
+                    self.focus_span = offset, limit, width
 
     # -- Environment 页 ---------------------------------------------------
 
@@ -2794,7 +2930,8 @@ class _Tui:
 
         environment = list(tools)
         if tools and docker.probed:
-            daemon = _Item(
+            daemon = _Item.dependency(
+                "docker-daemon",
                 "ready" if docker.ok else "failed",
                 "docker daemon",
                 "running" if docker.ok else "not running",
@@ -2808,12 +2945,13 @@ class _Tui:
                 state = "unknown"
             else:
                 state = "ready" if image in docker.images else "missing"
-            images.append(_Item(state, image))
+            images.append(_Item.dependency(f"image-{service}", state, image))
         return ports, environment, images
 
     def _draw_environment(self, top: int, bottom: int) -> None:
         a, s = self.a, self.sym
-        groups = self._env_items()
+        self.env_groups = self._env_items()
+        jobs = self.runner.view()
         titles = ("port", "environment", "docker image")
         base, extra = divmod(self.w - 6, 3)
         widths = [base + (1 if index < extra else 0) for index in range(3)]
@@ -2827,9 +2965,7 @@ class _Tui:
             self.put(bottom, sx, s["bt"])
         self.divider(top + 2, joins=seps)
 
-        self.env_cells = [[], [], []]
-        self.env_widths = [max(1, width - 4) for width in widths]
-        for panel, (title, items) in enumerate(zip(titles, groups)):
+        for panel, (title, items) in enumerate(zip(titles, self.env_groups)):
             px, pw = xs[panel], widths[panel]
             active = panel == self.panel
             self.put(
@@ -2846,22 +2982,27 @@ class _Tui:
                 segs = [(item.main, 0)]
                 if item.sub:
                     segs.append((" " + item.sub, a["gray"]))
-                self.env_cells[panel].append(segs)
                 y = top + 3 + index
                 if y >= bottom:
                     continue
-                self.put(y, px + 1, s[item.state], a[_STATE_COLOR[item.state]])
+                icon, attr = s[item.state], a[_STATE_COLOR[item.state]]
+                job = jobs.get(item.target.key) if item.target is not None else None
+                if job is not None:
+                    if job[0] == "running":
+                        icon, attr = self._spin(), a["yellow"]
+                    elif job[0] == "queued":
+                        icon, attr = s["queued"], a["gray"]
+                    elif item.state != "ready":
+                        icon, attr = s["failed"], a["red"]
+                self.put(y, px + 1, icon, attr)
                 focused = active and index == self.psel[panel]
-                offset = self.cell(
+                self.cell(
                     y,
                     px + 3,
                     pw - 4,
                     segs,
-                    self.poff if focused else 0,
                     a["rev"] if focused else 0,
                 )
-                if focused:
-                    self.poff = offset
 
     # -- Config 页 --------------------------------------------------------
 
@@ -2894,13 +3035,7 @@ class _Tui:
         lines = self._config_lines()
         width = self.w - 4
 
-        path = str(ENV_FILE)
-        if _text_width(path) > width:
-            ell = self.sym["ell"]
-            while path and _text_width(ell + path) > width:
-                path = path[1:]
-            path = ell + path
-        self.put(top + 1, 2, path, a["bold"])
+        self.cell(top + 1, 2, width, [(str(ENV_FILE), a["bold"])])
         self.divider(top + 2)
 
         if lines is None:
@@ -2917,7 +3052,7 @@ class _Tui:
             if number >= len(lines):
                 break
             segs = _slice_segs(self._env_segments(lines[number]), self.cfg_left)
-            self.cell(top + 3 + index, 2, width, segs)
+            self.cell(top + 3 + index, 2, width, segs, marquee=self.cfg_left == 0)
 
         counter = f" {min(self.cfg_top + rows, len(lines))}/{len(lines)} "
         self.put(bottom, self.w - 3 - len(counter), counter, a["gray"])
@@ -2946,7 +3081,12 @@ class _Tui:
             self.put(y0 + y, x0, s["v"])
             self.put(y0 + y, x0 + width - 1, s["v"])
         self.put(y0 + height - 1, x0, s["bl"] + s["h"] * (width - 2) + s["br"])
-        self.put(y0, x0 + 2, f" {modal.title} ", a["red" if modal.danger else "yellow"])
+        self.cell(
+            y0,
+            x0 + 2,
+            inner,
+            [(f" {modal.title} ", a["red" if modal.danger else "yellow"])],
+        )
         for index, line in enumerate(lines):
             text = _clip_cols(line, inner)
             self.put(y0 + 2 + index, x0 + 2, text, self._log_attr(line))
@@ -2969,9 +3109,13 @@ class _Tui:
         state = "FOLLOW" if view.follow else "PAUSED"
         right = f"{state}  {min(view.top + rows, total)}/{total}"
         x = self.put(0, 2, "Log: ", a["yellow"])
-        x = self.put(0, x, view.title, a["bold"]) + 2
         room = self.w - 4 - len(right) - x
-        self.put(0, x, _clip_cols(_rel(view.path), room), a["gray"])
+        self.cell(
+            0,
+            x,
+            room,
+            [(view.target.name, a["bold"]), ("  " + _rel(view.path), a["gray"])],
+        )
         self.put(
             0, self.w - 2 - len(right), right, a["green"] if view.follow else a["gray"]
         )
@@ -2983,8 +3127,13 @@ class _Tui:
             if number >= total:
                 break
             line = view.lines[number]
-            text = _clip_cols(line[view.left :], self.w - 4)
-            self.put(1 + index, 2, text, self._log_attr(line))
+            self.cell(
+                1 + index,
+                2,
+                self.w - 4,
+                [(line[view.left :], self._log_attr(line))],
+                marquee=view.left == 0,
+            )
         self._draw_options(
             self.h - 1,
             (
@@ -2993,6 +3142,11 @@ class _Tui:
                 ("Home/End", "", None),
                 ("F", ": Follow", None),
                 ("Esc", ": Back", None),
+                *(
+                    [("X", ": Cancel", None)]
+                    if self.runner.has_row(view.target.key)
+                    else []
+                ),
             ),
         )
 
@@ -3004,7 +3158,11 @@ class _Tui:
             self.put(index, 0, line)
 
     def draw(self) -> None:
-        self.h, self.w = self.scr.getmaxyx()
+        size = self.scr.getmaxyx()
+        if size != (self.h, self.w):
+            self.h, self.w = size
+            self.marquee_since = time.monotonic()
+            self.manual_offset = None
         self.scr.erase()
         if self.h < _MIN_HEIGHT or self.w < _MIN_WIDTH:
             self._draw_small()
@@ -3025,6 +3183,7 @@ class _Tui:
     # -- 按键处理 ---------------------------------------------------------
 
     def handle(self, key: int) -> None:
+        self.marquee_since = time.monotonic()
         if key == curses.KEY_RESIZE:
             return
         if self.modal is not None:
@@ -3044,8 +3203,8 @@ class _Tui:
             self._switch_tab((self.tab + 1) % len(self.TABS))
         elif key == curses.KEY_BTAB:
             self._switch_tab((self.tab - 1) % len(self.TABS))
-        elif name in {"c", "e"} or (name == "d" and self.tab != self.ENVIRONMENT):
-            self._switch_tab("ced".index(name))
+        elif name in {"c", "e", "p"}:
+            self._switch_tab("cep".index(name))
         elif self.tab == self.CONFIG:
             self._handle_config(key, name)
         elif self.tab == self.ENVIRONMENT:
@@ -3054,9 +3213,8 @@ class _Tui:
             self._handle_deploy(key, name)
 
     def _switch_tab(self, tab: int) -> None:
-        if tab != self.tab:
-            self.tab = tab
-            self.hoff = self.poff = 0
+        self.tab = tab
+        self.manual_offset = None
 
     def _handle_modal(self, key: int) -> None:
         modal = self.modal
@@ -3095,13 +3253,12 @@ class _Tui:
         self.cfg_top = max(0, self.cfg_top)
 
     def _handle_environment(self, key: int, name: str) -> None:
-        count = len(self.env_cells)
-        if name in {"w", "a"}:
-            self._set_panel(max(0, self.panel - 1))
-        elif name in {"s", "d"}:
-            self._set_panel(min(count - 1, self.panel + 1))
+        if key == curses.KEY_LEFT:
+            self.panel = max(0, self.panel - 1)
+        elif key == curses.KEY_RIGHT:
+            self.panel = min(len(self.env_groups) - 1, self.panel + 1)
         elif key in {curses.KEY_UP, curses.KEY_DOWN, curses.KEY_HOME, curses.KEY_END}:
-            last = max(0, len(self.env_cells[self.panel]) - 1)
+            last = max(0, len(self.env_groups[self.panel]) - 1)
             current = self.psel[self.panel]
             target = {
                 curses.KEY_UP: current - 1,
@@ -3110,16 +3267,45 @@ class _Tui:
                 curses.KEY_END: last,
             }[key]
             self.psel[self.panel] = max(0, min(last, target))
-            self.poff = 0
-        elif key in {curses.KEY_LEFT, curses.KEY_RIGHT}:
-            step = max(1, self.env_widths[self.panel] // 2)
-            delta = step if key == curses.KEY_RIGHT else -step
-            self.poff = max(0, self.poff + delta)
+        elif name in {"g", "l", "x"}:
+            item = self._selected_dependency()
+            if item is None or item.target is None:
+                return
+            if name == "g":
+                self._confirm_get(item)
+            elif name == "l":
+                self._open_log(item.target)
+            else:
+                self._cancel(item.target.key)
 
-    def _set_panel(self, panel: int) -> None:
-        if panel != self.panel:
-            self.panel = panel
-            self.poff = 0
+    def _selected_dependency(self) -> _Item | None:
+        items = self.env_groups[self.panel]
+        return items[self.psel[self.panel]] if items else None
+
+    def _confirm_get(self, item: _Item) -> None:
+        target = item.target
+        if target is None or item.state not in {"failed", "missing"}:
+            return
+        if self.runner.has_row(target.key):
+            self.flash(f"{item.main} already has a pending task.")
+            return
+        try:
+            command = _get_command(item)
+        except DeployError as exc:
+            self.flash(str(exc), error=True, seconds=8)
+            return
+
+        def start() -> None:
+            self.runner.submit(
+                [_Job(target, "Get", "Getting", lambda: _get_dependency(item, command))]
+            )
+
+        self.modal = _Modal(
+            f"Get: {item.main}",
+            ["Run in the project directory:", "", shlex.join(command)],
+            "Y: Run   N / Esc: Cancel",
+            {"y": start, "n": lambda: None, "esc": lambda: None},
+        )
 
     def _handle_deploy(self, key: int, name: str) -> None:
         last = len(_SPECS) - 1
@@ -3131,17 +3317,22 @@ class _Tui:
                 curses.KEY_END: last,
             }[key]
             self.sel = max(0, min(last, target))
-            self.hoff = 0
+            self.manual_offset = None
         elif key in {curses.KEY_PPAGE, curses.KEY_NPAGE}:
             self.sel = 0 if key == curses.KEY_PPAGE else last
-            self.hoff = 0
-        elif key == curses.KEY_LEFT:
-            self._deploy_horizontal(-1)
-        elif key == curses.KEY_RIGHT:
-            self._deploy_horizontal(1)
+            self.manual_offset = None
+        elif key in {curses.KEY_LEFT, curses.KEY_RIGHT}:
+            offset, limit, width = self.focus_span
+            direction = 1 if key == curses.KEY_RIGHT else -1
+            moved = max(0, min(limit, offset + direction * max(1, width // 2)))
+            if moved != offset:
+                self.manual_offset = moved
+            else:
+                self.col = max(0, min(2, self.col + direction))
+                self.manual_offset = None
         elif name == "b":
             self._act_row("build")
-        elif name == "p":
+        elif name == "d":
             self._act_row("deploy")
         elif name == "u":
             self._act_row("uninstall")
@@ -3153,33 +3344,6 @@ class _Tui:
             self._open_log(_SPECS[self.sel])
         elif name == "x":
             self._cancel()
-
-    def _deploy_horizontal(self, direction: int) -> None:
-        """在三个单元格间移动；被截断的单元格先滚动文本，到边界再换格。"""
-
-        if self.sel >= len(self.cells) or len(self.geo) != 3:
-            return
-
-        def span(col: int) -> tuple[str, int]:
-            text = "".join(piece for piece, _ in self.cells[self.sel][col])
-            return text, self.geo[col][1]
-
-        text, width = span(self.col)
-        ell = self.sym["ell"]
-        step = max(1, width // 2)
-        limit = _max_offset(text, width, ell)
-        if direction > 0:
-            if self.hoff < limit:
-                self.hoff = min(limit, self.hoff + step)
-            elif self.col < 2:
-                self.col += 1
-                self.hoff = 0
-        elif self.hoff > 0:
-            self.hoff = max(0, self.hoff - step)
-        elif self.col > 0:
-            self.col -= 1
-            text, width = span(self.col)
-            self.hoff = _max_offset(text, width, ell)
 
     def _handle_log(self, key: int, name: str) -> None:
         view = self.log
@@ -3193,6 +3357,9 @@ class _Tui:
             return
         if name == "f":
             view.follow = not view.follow
+            return
+        if name == "x":
+            self._cancel(view.target.key)
             return
         if key == curses.KEY_UP:
             top -= 1
@@ -3283,15 +3450,14 @@ class _Tui:
             danger=True,
         )
 
-    def _cancel(self) -> None:
-        if self.runner.busy():
-            self.runner.cancel_all()
+    def _cancel(self, key: str | None = None) -> None:
+        if self.runner.cancel(key):
             self.flash("Cancelling tasks...")
         else:
             self.flash("No running tasks.")
 
-    def _open_log(self, spec: _Spec) -> None:
-        self.log = _LogView(spec.name, DEPLOY_LOG_DIR / f"{spec.log_name}.log")
+    def _open_log(self, spec: _Target) -> None:
+        self.log = _LogView(spec)
 
     def _show_failure(self, job: _Job) -> None:
         spec = job.spec
