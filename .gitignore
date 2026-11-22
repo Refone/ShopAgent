@@ -36,6 +36,7 @@ coverage/
 .pyright/
 .ruff_cache/
 .hypothesis/
+.var/
 
 # Local environment variables and secrets
 .env
