@@ -53,13 +53,16 @@ cp .env.example .env
 需要本机已安装 Docker（含 Compose v2）、uv、Node.js 18+ 和 npm。
 
 ```shell
-python deploy.py          # 交互式菜单
+python deploy.py          # ASCII 交互式控制台（自动检查依赖、配置、端口和服务）
 python deploy.py deploy   # 构建并启动全部服务
-python deploy.py status   # 查看服务状态
+python deploy.py status   # 命令行查看状态
+python deploy.py help     # man 风格的完整部署手册
 python deploy.py undeploy # 停止服务，保留数据卷
 ```
 
-`ai-service` 当前尚未实现，构建和部署时会自动跳过；重置数据库使用 `python deploy.py reset-db`。
+交互控制台中使用方向键选择服务或操作，`Enter` 启动/重启，`B` 重建，`R` 重启，`S` 停止，`L` 查看日志，`A` 部署全部，`D` 重置数据库，`F` 刷新检查，`J/K` 翻页，`?` 查看手册，`Q/Esc` 退出。服务状态和端口状态会持续显示在面板中，因此不再需要单独的“查看状态”菜单项。
+
+完整手册位于 [docs/deploy/help.txt](docs/deploy/help.txt)，也可以直接运行 `python deploy.py help`。`ai-service` 当前尚未实现，构建和部署时会自动跳过。
 
 ## 架构总览
 
