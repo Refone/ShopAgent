@@ -23,6 +23,7 @@ node_modules/
 vite.config.*.timestamp-*
 
 # Test, coverage, and analysis caches
+var/
 .pytest_cache/
 .coverage
 .coverage.*
@@ -36,7 +37,6 @@ coverage/
 .pyright/
 .ruff_cache/
 .hypothesis/
-.var/
 
 # Local environment variables and secrets
 .env
