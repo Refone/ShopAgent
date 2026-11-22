@@ -2875,6 +2875,8 @@ class _Tui:
                 ("Left / Right", ":Switch Panels", None),
                 ("Up / Down", ":Select Items", None),
             ]
+            if any(self._pending_get_items()):
+                options.append(("A", ":Get All", None))
             item = self._selected_dependency()
             if item is not None and item.target is not None:
                 pending = self.runner.has_row(item.target.key)
@@ -3358,6 +3360,8 @@ class _Tui:
                 curses.KEY_END: last,
             }[key]
             self.psel[self.panel] = max(0, min(last, target))
+        elif name == "a":
+            self._confirm_get_all()
         elif name in {"g", "l", "x"}:
             item = self._selected_dependency()
             if item is None or item.target is None:
@@ -3396,6 +3400,94 @@ class _Tui:
             ["Run in the project directory:", "", shlex.join(command)],
             "Y: Run   N / Esc: Cancel",
             {"y": start, "n": lambda: None, "esc": lambda: None},
+        )
+
+    def _pending_get_items(self) -> tuple[list[_Item], list[_Item]]:
+        """Return missing tools and images that do not already have a job."""
+
+        if len(self.env_groups) < 3:
+            return [], []
+        tools = [
+            item
+            for item in self.env_groups[1]
+            if item.target is not None
+            and item.state in {"missing", "failed"}
+            and not self.runner.has_row(item.target.key)
+        ]
+        images = [
+            item
+            for item in self.env_groups[2]
+            if item.target is not None
+            and item.state in {"missing", "failed"}
+            and not self.runner.has_row(item.target.key)
+        ]
+        return tools, images
+
+    def _confirm_get_all(self) -> None:
+        """Queue Get tasks for every missing dependency and image."""
+
+        tools, images = self._pending_get_items()
+        items = [*tools, *images]
+        if not items:
+            pending = any(
+                item.target is not None and self.runner.has_row(item.target.key)
+                for group in self.env_groups[1:]
+                for item in group
+            )
+            self.flash(
+                "Dependency tasks are already queued."
+                if pending
+                else "All dependencies are ready."
+            )
+            return
+
+        plans: list[tuple[_Item, list[str]]] = []
+        for item in items:
+            try:
+                plans.append((item, _get_command(item)))
+            except DeployError as exc:
+                self.flash(str(exc), error=True, seconds=8)
+                return
+
+        def start() -> None:
+            group = object()
+            jobs: list[_Job] = []
+            for item, command in plans:
+                target = item.target
+                assert target is not None
+                jobs.append(
+                    _Job(
+                        target,
+                        "Get",
+                        "Getting",
+                        lambda item=item, command=command: _get_dependency(
+                            item, command
+                        ),
+                        group,
+                    )
+                )
+            self.runner.submit(jobs)
+            self.flash(f"Get All: {len(jobs)} tasks queued.")
+
+        def noop() -> None:
+            pass
+
+        summary: list[str] = []
+        if tools:
+            summary.append("Dependencies: " + ", ".join(item.main for item in tools))
+        if images:
+            summary.append("Images: " + ", ".join(item.main for item in images))
+        self.modal = _Modal(
+            "Get All",
+            [
+                f"{len(tools)} dependencies and {len(images)} images need attention.",
+                "",
+                *summary,
+                "",
+                "Tasks run one at a time.",
+            ],
+            "Y: Run   N / Esc: Cancel",
+            {"y": start, "n": noop, "esc": noop},
         )
 
     def _handle_status(self, key: int, name: str) -> None:
