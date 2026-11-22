@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.3
+    rev: v0.17.6
     hooks:
       # 整理 import，并删除未使用的 import
       - id: ruff
@@ -15,3 +15,12 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: end-of-file-fixer
+
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier
+        entry: npx --no-install prettier --write --ignore-unknown
+        language: system
+        files: '\.(js|mjs|cjs|ts|mts|cts|vue|css|scss|sass|less|html|json|jsonc|ya?ml|md|mdx|code-workspace)$'
+        exclude: '(^|/)package-lock\.json$'

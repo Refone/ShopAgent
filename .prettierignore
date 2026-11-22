@@ -1,0 +1,21 @@
+# 依赖与构建产物
+node_modules/
+dist/
+.vite/
+coverage/
+*.min.js
+*.min.css
+
+# Python
+.venv/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+
+# 锁文件
+package-lock.json
+uv.lock
+
+# 运行时与本地配置
+var/
+.vscode/

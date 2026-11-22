@@ -9,6 +9,13 @@
   - 如果工作区或是暂存区有未提交的更改，则直接增量更新工作区，不要提交 commit。
   - 如果工作区和暂存区都干净，则直接提交 commit。
 
+## 格式化
+
+- 首次使用：在仓库根目录运行 `npm install`，并运行 `pre-commit install`。
+- 提交前运行 `pre-commit run --all-files`；不要使用 `git commit --no-verify`。
+- 前端使用 Prettier（根目录 `.prettierrc.json`），可在仓库根目录运行 `npm run format`。
+- 后端 Python 使用 Ruff；ecommerce-service 行宽 100，customer-service 行宽 88。
+
 ## 项目约定
 
 - 数据库中有的表同时拥有 `id` 和 `uuid` 字段，`id` 是自增主键，`uuid` 是全局唯一标识符。
