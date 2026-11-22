@@ -660,19 +660,73 @@ def _pid_command(pid: int) -> str:
     return result.stdout.strip()
 
 
+def _listening_pids(port: int) -> list[int]:
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        raise DeployError("恢复丢失的 PID 文件需要 lsof，但当前系统未找到 lsof。")
+    try:
+        result = subprocess.run(
+            [lsof, "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DeployError(f"查询端口 {port} 的监听进程失败：{exc}") from exc
+    if result.returncode not in {0, 1}:
+        detail = result.stderr.strip() or f"退出码 {result.returncode}"
+        raise DeployError(f"查询端口 {port} 的监听进程失败：{detail}")
+    return [int(item) for item in result.stdout.split() if item.isdigit()]
+
+
+def _process_home(name: str) -> tuple[Path, str, int, tuple[str, ...]] | None:
+    """返回后台进程所属目录、监听地址，以及认领时命令行必须包含的标识。"""
+
+    if name == "customer-service":
+        host = env("CUSTOMER_SERVICE_HOST", "127.0.0.1")
+        port = env_int("CUSTOMER_SERVICE_PORT", 18000)
+        return CUSTOMER_DIR, host, port, ("customer_service.app.app",)
+    for frontend in _FRONTENDS:
+        if frontend.name == name:
+            host, port = _frontend_host(frontend), _frontend_port(frontend)
+            # 只认领 deploy 启动的 vite preview，不碰手动运行的 npm run dev。
+            return frontend.directory, host, port, ("vite", "preview")
+    return None
+
+
+def _recover_pid(name: str) -> int | None:
+    """PID 文件丢失时，认领本检出启动、仍在监听端口的进程。"""
+
+    home = _process_home(name)
+    if home is None:
+        return None
+    directory, host, port, tokens = home
+    if not _tcp_ok(host, port):
+        return None
+    prefix = f"{directory}{os.sep}"
+    for pid in _listening_pids(port):
+        command = _pid_command(pid)
+        if prefix in command and all(token in command for token in tokens):
+            _write_pid(name, pid)
+            _warn(f"{name} 的 PID 文件已丢失，已认领本检出的进程 {pid}")
+            return pid
+    return None
+
+
 def _tracked_pid(name: str, marker: str | None = None) -> int | None:
     pid = _read_pid(name)
     if pid is None:
-        return None
+        return _recover_pid(name)
     if not _pid_alive(pid):
         _remove_pid(name)
-        return None
+        return _recover_pid(name)
 
     command = _pid_command(pid)
     if marker and command and marker not in command:
         _warn(f"PID 文件 {_pid_file(name).name} 指向的进程 {pid} 与预期不符，已忽略")
         _remove_pid(name)
-        return None
+        return _recover_pid(name)
     return pid
 
 
@@ -1742,18 +1796,26 @@ def _deploy_row(spec: _Spec, force_build: bool) -> None:
         raise DeployError(f"{spec.name} 尚未实现")
 
 
+def _row_process(spec: _Spec) -> tuple[str, str] | None:
+    """返回由本检出以后台进程方式管理的行对应的 PID 名称与命令标识。"""
+
+    if spec.kind == "customer":
+        return "customer-service", "customer_service.app.app"
+    if spec.frontend is not None:
+        return spec.frontend.name, "vite"
+    return None
+
+
 def _uninstall_row(spec: _Spec, final: bool = False, volumes: bool = False) -> None:
     """卸载单行；final 表示这是批量卸载的最后一项，改用 compose down 收尾。"""
 
     _section(f"卸载 {spec.name}")
-    if spec.kind == "customer":
-        if not _stop_process("customer-service", "customer_service.app.app"):
-            _info("customer-service 未在运行")
-    elif spec.frontend is not None:
-        stopped = _stop_process(spec.frontend.name, "vite")
+    process = _row_process(spec)
+    if process is not None:
+        stopped = _stop_process(*process)
         _ensure_port_free(spec.name, *_endpoint(spec))
         if not stopped:
-            _info(f"{spec.frontend.name} 未在运行")
+            _info(f"{process[0]} 未在运行")
     elif spec.kind in {"ecommerce", "infra"}:
         _prepare()
         _require_docker()
@@ -1861,8 +1923,9 @@ def _probe_row(
             info.state = "missing"
         return info
 
+    process = _row_process(spec)
     if info.listening:
-        if spec.frontend and _tracked_pid(spec.frontend.name, "vite") is None:
+        if process is not None and _tracked_pid(*process) is None:
             info.state = "failed"
             info.url = f"Port {port} in use (not managed by this checkout)"
             return info
@@ -1872,14 +1935,9 @@ def _probe_row(
 
     if spec.kind == "ecommerce":
         built = meta["app"][0] in docker.images
-        busy = False
-    elif spec.kind == "customer":
-        built = _built_locally(spec)
-        busy = _tracked_pid("customer-service", "customer_service.app.app") is not None
     else:
         built = _built_locally(spec)
-        name = spec.frontend.name if spec.frontend else spec.key
-        busy = _tracked_pid(name, "vite") is not None
+    busy = process is not None and _tracked_pid(*process) is not None
     if busy:
         info.state = "failed"
     else:
