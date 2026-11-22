@@ -1,6 +1,6 @@
 """ShopAgent 一键式部署脚本。
 
-不带参数运行时进入交互式菜单；带子命令时用于 CI 等非交互场景，例如：
+不带参数运行时进入 htop 风格的 TUI；带子命令时用于 CI 等非交互场景，例如：
 
     python deploy.py deploy
     python deploy.py build frontend
@@ -11,19 +11,32 @@
 from __future__ import annotations
 
 import argparse
+import json
+import locale
 import os
+import re
 import shlex
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+import traceback
+import unicodedata
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections import deque
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
+
+try:
+    import curses
+except ImportError:  # 例如未安装 windows-curses 的 Windows
+    curses = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parent
 ENV_FILE = ROOT / ".env"
@@ -106,9 +119,25 @@ _HTTP_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _ENV_CACHE: dict[str, str] | None = None
 _DOCKER_READY = False
 
+# 线程上下文：TUI 的任务线程在这里挂载日志出口（sink）和当前任务（job），
+# 命令行模式下两者都为空，输出直接打印到终端。
+_CTX = threading.local()
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
 
 class DeployError(RuntimeError):
     """可预期的部署错误，由入口统一打印。"""
+
+
+def _emit(text: str = "", *, err: bool = False) -> None:
+    """输出文本：任务线程中写入任务日志，否则打印到终端。"""
+
+    sink = getattr(_CTX, "sink", None)
+    if sink is None:
+        print(text, file=sys.stderr if err else sys.stdout)
+        return
+    for line in _ANSI_RE.sub("", text).splitlines() or [""]:
+        sink(line)
 
 
 def _paint(text: str, code: str) -> str:
@@ -116,23 +145,43 @@ def _paint(text: str, code: str) -> str:
 
 
 def _section(title: str) -> None:
-    print(f"\n{_paint(f'== {title} ==', '1;36')}")
+    _emit(f"\n{_paint(f'== {title} ==', '1;36')}")
 
 
 def _info(message: str) -> None:
-    print(f"{_paint('[deploy]', '36')} {message}")
+    _emit(f"{_paint('[deploy]', '36')} {message}")
 
 
 def _ok(message: str) -> None:
-    print(f"{_paint('[  ok  ]', '32')} {message}")
+    _emit(f"{_paint('[  ok  ]', '32')} {message}")
 
 
 def _warn(message: str) -> None:
-    print(f"{_paint('[ warn ]', '33')} {message}")
+    _emit(f"{_paint('[ warn ]', '33')} {message}")
 
 
 def _error(message: str) -> None:
-    print(f"{_paint('[ fail ]', '31')} {message}", file=sys.stderr)
+    _emit(f"{_paint('[ fail ]', '31')} {message}", err=True)
+
+
+def _check_cancel() -> None:
+    """当前任务被用户取消时抛出 DeployError，供等待循环及时退出。"""
+
+    job = getattr(_CTX, "job", None)
+    if job is not None and job.cancelled:
+        raise DeployError("任务已取消")
+
+
+def _kill_process_group(process: subprocess.Popen, sig: int = signal.SIGTERM) -> None:
+    """向子进程所在进程组发送信号。"""
+
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, sig)
+        else:
+            process.terminate()
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _rel(path: Path) -> str:
@@ -284,6 +333,60 @@ def create_env(force: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _run_streamed(
+    args: list[str],
+    cwd: Path | None,
+    env_values: dict[str, str] | None,
+    timeout: float | None,
+) -> subprocess.CompletedProcess[str]:
+    """TUI 任务线程中执行命令：输出逐行写入任务日志，支持取消与超时。"""
+
+    sink = _CTX.sink
+    job = getattr(_CTX, "job", None)
+    process = subprocess.Popen(
+        args,
+        cwd=str(cwd) if cwd is not None else None,
+        env=env_values,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        bufsize=1,
+        start_new_session=True,
+    )
+    timed_out = threading.Event()
+
+    def _on_timeout() -> None:
+        timed_out.set()
+        _kill_process_group(process)
+
+    timer = threading.Timer(timeout, _on_timeout) if timeout else None
+    if timer is not None:
+        timer.start()
+    if job is not None:
+        job.process = process
+        if job.cancelled:
+            _kill_process_group(process)
+
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            sink(_ANSI_RE.sub("", line.rstrip("\r\n")))
+        process.wait()
+    finally:
+        if timer is not None:
+            timer.cancel()
+        if job is not None:
+            job.process = None
+
+    if job is not None and job.cancelled:
+        raise DeployError("任务已取消")
+    if timed_out.is_set():
+        raise DeployError(f"命令执行超时：{shlex.join(args)}")
+    return subprocess.CompletedProcess(args, process.returncode, "", "")
+
+
 def _run(
     command: Sequence[str | Path],
     *,
@@ -298,16 +401,21 @@ def _run(
     if announce:
         _info(f"$ {shlex.join(args)}")
 
+    in_tui = getattr(_CTX, "sink", None) is not None
     try:
-        completed = subprocess.run(
-            args,
-            cwd=str(cwd) if cwd is not None else None,
-            env=env_values,
-            capture_output=capture,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        if in_tui and not capture:
+            completed = _run_streamed(args, cwd, env_values, timeout)
+        else:
+            completed = subprocess.run(
+                args,
+                cwd=str(cwd) if cwd is not None else None,
+                env=env_values,
+                stdin=subprocess.DEVNULL if in_tui else None,
+                capture_output=capture,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
     except FileNotFoundError as exc:
         raise DeployError(f"命令不存在：{args[0]}") from exc
     except subprocess.TimeoutExpired as exc:
@@ -450,6 +558,7 @@ def _wait_http(
     _info(f"等待 {name} 就绪：{url}")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        _check_cancel()
         if process is not None and process.poll() is not None:
             _tail_file(log_path)
             raise DeployError(f"{name} 进程已退出（退出码 {process.returncode}）。")
@@ -467,6 +576,7 @@ def _wait_postgres_container(timeout: float = 90.0) -> None:
     _info("等待 PostgreSQL 容器就绪 ...")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        _check_cancel()
         result = _compose(
             "exec",
             "-T",
@@ -495,7 +605,7 @@ def _tail_file(path: Path | None, lines: int = 40) -> None:
     tail = content[-lines:]
     if tail:
         _warn(f"{_rel(path)} 最后 {len(tail)} 行：")
-        print("\n".join(tail))
+        _emit("\n".join(tail))
 
 
 def _pid_file(name: str) -> Path:
@@ -632,6 +742,7 @@ def _start_background(
                 [str(item) for item in command],
                 cwd=str(cwd),
                 env=process_env,
+                stdin=subprocess.DEVNULL,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -936,7 +1047,7 @@ def _show_compose_logs(service: str, lines: int = 60) -> None:
     output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part)
     if output:
         _warn(f"{service} 最后 {lines} 行日志：")
-        print(output)
+        _emit(output)
 
 
 def deploy_ecommerce_service(rebuild: bool = True) -> bool:
@@ -1182,7 +1293,7 @@ def ensure_environment() -> bool:
     _ok("Docker、uv、Node.js、npm 均可用")
     _info("前端访问地址：")
     for frontend in _FRONTENDS:
-        print(
+        _emit(
             f"         {frontend.name:<16} "
             f"{_display_url(_frontend_host(frontend), _frontend_port(frontend))}"
         )
@@ -1260,7 +1371,7 @@ def check_status() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 交互式菜单与命令行入口
+# 命令行入口
 # ---------------------------------------------------------------------------
 
 
@@ -1331,100 +1442,1985 @@ def _deploy_selected(values: Sequence[str], rebuild: bool = True) -> bool:
     return True
 
 
-_MENU = """
-请选择操作：
-  1. 初始化环境（创建 .env、检查依赖）
-  2. 构建全部服务
-  3. 一键部署（构建 + 启动全部）
-  4. 查看服务状态
-  5. 重置全部数据库
-  6. 停止并卸载全部服务
-  7. 单独构建 / 部署服务
-  0. 退出
-"""
-
-_SERVICE_MENU = """
-请选择操作：
-  1. 构建 ecommerce-service
-  2. 构建 customer-service
-  3. 构建 frontend
-  4. 部署 ecommerce-service
-  5. 部署 customer-service
-  6. 部署 frontend
-  0. 返回
-"""
+# ---------------------------------------------------------------------------
+# TUI：服务清单与单行动作
+# ---------------------------------------------------------------------------
 
 
-def _interactive_service_menu() -> None:
-    print(_SERVICE_MENU)
+@dataclass(frozen=True)
+class _Spec:
+    """Deploy 页的一行：一个可构建、部署、卸载的服务。"""
+
+    key: str
+    name: str
+    log_name: str
+    kind: str  # ecommerce | customer | ai | frontend | infra
+    service: str = ""  # compose 服务名
+    frontend: _Frontend | None = None
+
+
+_SPECS = (
+    _Spec("ecommerce", "ecommerce-service", "ecommerce-service", "ecommerce", "app"),
+    _Spec("customer", "customer-service", "customer-service", "customer"),
+    _Spec("ai", "ai-service", "ai-service", "ai"),
+    _Spec(
+        "user-frontend",
+        "frontend-user",
+        "user-frontend",
+        "frontend",
+        frontend=_FRONTENDS[0],
+    ),
+    _Spec(
+        "admin-frontend",
+        "frontend-admin",
+        "admin-frontend",
+        "frontend",
+        frontend=_FRONTENDS[1],
+    ),
+    _Spec("redis", "ecommerce-redis", "ecommerce-redis", "infra", "redis"),
+    _Spec("postgres", "ecommerce-pg", "ecommerce-postgres", "infra", "postgres"),
+)
+_SPEC_BY_KEY = {spec.key: spec for spec in _SPECS}
+_DEPLOY_ORDER = (
+    "postgres",
+    "redis",
+    "ecommerce",
+    "customer",
+    "user-frontend",
+    "admin-frontend",
+)
+_UNINSTALL_ORDER = tuple(reversed(_DEPLOY_ORDER))
+
+# 行 -> (主机变量, 端口变量, 默认端口)
+_ENDPOINT_ENV = {
+    "ecommerce": ("ECOMMERCE_SERVICE_HOST", "ECOMMERCE_SERVICE_PORT", 18001),
+    "customer": ("CUSTOMER_SERVICE_HOST", "CUSTOMER_SERVICE_PORT", 18000),
+    "ai": ("AI_SERVICE_HOST", "AI_SERVICE_PORT", 18002),
+    "user-frontend": ("USER_FRONTEND_HOST", "USER_FRONTEND_PORT", 18100),
+    "admin-frontend": ("ADMIN_FRONTEND_HOST", "ADMIN_FRONTEND_PORT", 18101),
+    "postgres": ("POSTGRES_HOST", "POSTGRES_PORT", 18200),
+    "redis": ("", "REDIS_PORT", 18201),
+}
+_HEALTH_PATH = {
+    "ecommerce": "/health",
+    "customer": "/openapi.json",
+    "user-frontend": "/",
+    "admin-frontend": "/",
+}
+
+# compose 服务 -> (镜像, 容器名)；compose config 不可用时作为回退
+_COMPOSE_DEFAULTS = {
+    "app": ("ecommerce-customer-service-app:latest", "ecommerce-app"),
+    "postgres": ("pgvector/pgvector:pg16", "ecommerce-postgres"),
+    "redis": ("redis:7.4-alpine", "ecommerce-redis"),
+}
+_COMPOSE_META: dict[str, tuple[str, str]] | None = None
+
+
+def _discard(_line: str) -> None:
+    """静默的日志出口，用于 UI 线程与探测线程。"""
+
+
+def _silence() -> None:
+    _CTX.sink = _discard
+
+
+def _set_phase(phase: str) -> None:
+    job = getattr(_CTX, "job", None)
+    if job is not None:
+        job.phase = phase
+
+
+def _image_ref(image: str) -> str:
+    name = image.rsplit("/", 1)[-1]
+    return image if ":" in name else f"{image}:latest"
+
+
+def _compose_meta(refresh: bool = False) -> dict[str, tuple[str, str]]:
+    """通过 docker compose config 读取各服务的镜像与容器名。"""
+
+    global _COMPOSE_META
+    if _COMPOSE_META is not None and not refresh:
+        return _COMPOSE_META
+
+    meta = dict(_COMPOSE_DEFAULTS)
+    env_file = ENV_FILE if ENV_FILE.exists() else ENV_EXAMPLE
     try:
-        choice = input("请输入序号：").strip()
-    except EOFError:
-        return
+        result = _run(
+            [
+                "docker",
+                "compose",
+                "--env-file",
+                env_file,
+                "-f",
+                COMPOSE_FILE,
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=ECOMMERCE_DIR,
+            capture=True,
+            check=False,
+            announce=False,
+            timeout=20,
+        )
+        data = json.loads(result.stdout) if result.returncode == 0 else {}
+    except (DeployError, ValueError):
+        data = {}
 
-    if choice == "1":
-        build_ecommerce_service()
-    elif choice == "2":
-        build_customer_service()
-    elif choice == "3":
-        build_frontend()
-    elif choice == "4":
-        deploy_ecommerce_service()
-    elif choice == "5":
-        deploy_customer_service()
-    elif choice == "6":
-        deploy_frontend()
-    elif choice == "0":
-        return
+    project = data.get("name") or "ecommerce-customer-service"
+    for service, conf in (data.get("services") or {}).items():
+        image = conf.get("image") or f"{project}-{service}"
+        container = conf.get("container_name") or f"{project}-{service}-1"
+        meta[service] = (_image_ref(image), container)
+    _COMPOSE_META = meta
+    return meta
+
+
+def _endpoint(spec: _Spec) -> tuple[str, int]:
+    host_key, port_key, default = _ENDPOINT_ENV[spec.key]
+    host = env(host_key, "127.0.0.1") if host_key else "127.0.0.1"
+    return host, env_int(port_key, default)
+
+
+def _row_url(spec: _Spec, host: str, port: int) -> str:
+    if spec.key == "postgres":
+        return f"postgresql://{_url_host(host)}:{port}"
+    if spec.key == "redis":
+        return f"redis://{_url_host(host)}:{port}"
+    return _display_url(host, port)
+
+
+def _docker_text(spec: _Spec, meta: dict[str, tuple[str, str]]) -> str:
+    if spec.kind == "ecommerce":
+        return ", ".join(meta[service][1] for service in ("app", "postgres", "redis"))
+    if spec.kind == "customer":
+        return meta["postgres"][1]
+    if spec.kind == "infra":
+        return meta[spec.service][1]
+    return ""
+
+
+def _image_exists(image: str) -> bool:
+    result = _run(
+        ["docker", "image", "inspect", image],
+        capture=True,
+        check=False,
+        announce=False,
+        timeout=15,
+    )
+    return result.returncode == 0
+
+
+def _built_locally(spec: _Spec) -> bool:
+    if spec.kind == "customer":
+        return _customer_venv_python() is not None and _customer_uvicorn() is not None
+    if spec.frontend is not None:
+        return (
+            spec.frontend.directory / "dist" / "index.html"
+        ).exists() and _vite_binary(spec.frontend.directory) is not None
+    return False
+
+
+def _row_built(spec: _Spec) -> bool:
+    if spec.kind in {"ecommerce", "infra"}:
+        _require_docker()
+        return _image_exists(_compose_meta()[spec.service][0])
+    return _built_locally(spec)
+
+
+def _wait_redis_container(timeout: float = 60.0) -> None:
+    _info("等待 Redis 容器就绪 ...")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _check_cancel()
+        result = _compose(
+            "exec",
+            "-T",
+            "redis",
+            "redis-cli",
+            "ping",
+            capture=True,
+            check=False,
+            announce=False,
+        )
+        if result.returncode == 0 and "PONG" in result.stdout:
+            _ok("Redis 已就绪")
+            return
+        time.sleep(1.0)
+    raise DeployError(f"Redis 在 {timeout:.0f} 秒内未就绪。")
+
+
+def _pull_infra(spec: _Spec) -> None:
+    _prepare()
+    _require_docker()
+    image = _compose_meta()[spec.service][0]
+    _section(f"拉取 {spec.name} 镜像")
+    result = _compose("pull", spec.service, check=False)
+    if result.returncode == 0:
+        _ok(f"{image} 已是最新")
+    elif _image_exists(image):
+        _warn(f"镜像拉取失败，继续使用本地镜像 {image}")
     else:
-        _warn("无效的序号")
+        raise DeployError(f"镜像 {image} 拉取失败，且本地不存在。")
 
 
-def _interactive_menu() -> int:
-    while True:
-        print(_MENU)
-        try:
-            choice = input("请输入序号：").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
+def _deploy_infra(spec: _Spec) -> None:
+    _prepare()
+    _require_docker()
+    _section(f"部署 {spec.name}")
+    _compose("up", "-d", spec.service)
+    if spec.service == "postgres":
+        _wait_postgres_container()
+    else:
+        _wait_redis_container()
+    host, port = _endpoint(spec)
+    _ok(f"{spec.name}：{_row_url(spec, host, port)}")
 
-        if choice == "0":
-            return 0
 
-        try:
-            if choice == "1":
-                create_env()
-                ensure_environment()
-            elif choice == "2":
-                build_all_services()
-            elif choice == "3":
-                build_all_services()
-                deploy_all_services(rebuild=False)
-            elif choice == "4":
-                check_status()
-            elif choice == "5":
-                reset_all_databases()
-            elif choice == "6":
-                remove_volumes = _confirm("是否同时删除数据卷？")
-                undeploy_all_services(remove_volumes=remove_volumes)
-            elif choice == "7":
-                _interactive_service_menu()
+def _build_row(spec: _Spec) -> None:
+    if spec.kind == "ecommerce":
+        build_ecommerce_service()
+    elif spec.kind == "customer":
+        build_customer_service()
+    elif spec.frontend is not None:
+        _prepare()
+        _require_command("node", "请安装 Node.js 18 或更高版本。")
+        _require_command("npm", "请安装 npm。")
+        _build_frontend(spec.frontend)
+    elif spec.kind == "infra":
+        _pull_infra(spec)
+    else:
+        raise DeployError(f"{spec.name} 尚未实现")
+
+
+def _deploy_row(spec: _Spec, force_build: bool) -> None:
+    """部署单行；force_build 为假时仅在缺少构建产物时先构建。"""
+
+    if spec.kind == "ecommerce":
+        _prepare()
+        if force_build or not _row_built(spec):
+            _set_phase("Building")
+            build_ecommerce_service()
+            _set_phase("Deploying")
+        deploy_ecommerce_service(rebuild=False)
+    elif spec.kind == "customer":
+        _prepare()
+        if force_build or not _row_built(spec):
+            _set_phase("Building")
+            build_customer_service()
+            _set_phase("Deploying")
+        deploy_customer_service()
+    elif spec.frontend is not None:
+        _prepare()
+        if force_build or not _row_built(spec):
+            _set_phase("Building")
+            _build_row(spec)
+            _set_phase("Deploying")
+        _section(f"部署 {spec.frontend.name}")
+        _deploy_frontend(spec.frontend)
+    elif spec.kind == "infra":
+        _prepare()
+        if force_build:
+            _set_phase("Building")
+            _pull_infra(spec)
+            _set_phase("Deploying")
+        _deploy_infra(spec)
+    else:
+        raise DeployError(f"{spec.name} 尚未实现")
+
+
+def _uninstall_row(spec: _Spec, final: bool = False, volumes: bool = False) -> None:
+    """卸载单行；final 表示这是批量卸载的最后一项，改用 compose down 收尾。"""
+
+    _section(f"卸载 {spec.name}")
+    if spec.kind == "customer":
+        if not _stop_process("customer-service", "customer_service.app.app"):
+            _info("customer-service 未在运行")
+    elif spec.frontend is not None:
+        if not _stop_process(spec.frontend.name, "vite"):
+            _info(f"{spec.frontend.name} 未在运行")
+    elif spec.kind in {"ecommerce", "infra"}:
+        _prepare()
+        _require_docker()
+        if final:
+            args = ["down", "--remove-orphans"]
+            if volumes:
+                args.append("-v")
+            _compose(*args)
+        else:
+            _compose("rm", "-sf", spec.service)
+        if final:
+            if volumes:
+                _warn("PostgreSQL / Redis 数据卷已删除")
             else:
-                _warn("无效的序号")
-        except DeployError as exc:
-            _error(str(exc))
-        except OSError as exc:
-            _error(f"系统错误：{exc}")
-        except KeyboardInterrupt:
-            print()
-            _warn("操作已取消")
+                _info("PostgreSQL / Redis 数据卷已保留，下次部署会继续使用")
+    else:
+        raise DeployError(f"{spec.name} 尚未实现")
+    _ok(f"{spec.name} 已卸载")
 
+
+# ---------------------------------------------------------------------------
+# TUI：状态探测
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RowInfo:
+    state: str = "unknown"  # online | ready | failed | missing | unknown
+    url: str = ""
+    port: int = 0
+    listening: bool = False
+
+
+@dataclass(frozen=True)
+class _Item:
+    state: str
+    main: str
+    sub: str = ""
+
+
+@dataclass
+class _DockerInfo:
+    probed: bool = False
+    ok: bool = False
+    containers: dict[str, str] = field(default_factory=dict)
+    images: set[str] = field(default_factory=set)
+
+
+def _docker_info() -> _DockerInfo:
+    info = _DockerInfo(probed=True)
+    try:
+        containers = _run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.State}}"],
+            capture=True,
+            check=False,
+            announce=False,
+            timeout=8,
+        )
+        if containers.returncode != 0:
+            return info
+        images = _run(
+            ["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"],
+            capture=True,
+            check=False,
+            announce=False,
+            timeout=8,
+        )
+    except DeployError:
+        return info
+
+    for line in containers.stdout.splitlines():
+        name, _, state = line.partition("\t")
+        if name:
+            info.containers[name] = state.strip()
+    if images.returncode == 0:
+        info.images = {line.strip() for line in images.stdout.splitlines() if line}
+    info.ok = True
+    return info
+
+
+def _probe_row(
+    spec: _Spec, docker: _DockerInfo, meta: dict[str, tuple[str, str]]
+) -> _RowInfo:
+    if spec.kind == "ai":
+        return _RowInfo("missing", "Not implemented")
+
+    host, port = _endpoint(spec)
+    info = _RowInfo(url=_row_url(spec, host, port), port=port)
+    info.listening = _tcp_ok(host, port)
+
+    if spec.kind == "infra":
+        image, container = meta[spec.service]
+        if info.listening:
+            running = docker.containers.get(container) == "running"
+            info.state = "online" if running else "failed"
+        elif container in docker.containers or image in docker.images:
+            info.state = "ready"
+        else:
+            info.state = "missing"
+        return info
+
+    if info.listening:
+        url = _http_url(host, port, _HEALTH_PATH[spec.key])
+        info.state = "online" if _http_ok(url, timeout=1.5) else "failed"
+        return info
+
+    if spec.kind == "ecommerce":
+        built = meta["app"][0] in docker.images
+        busy = False
+    elif spec.kind == "customer":
+        built = _built_locally(spec)
+        busy = _tracked_pid("customer-service", "customer_service.app.app") is not None
+    else:
+        built = _built_locally(spec)
+        name = spec.frontend.name if spec.frontend else spec.key
+        busy = _tracked_pid(name, "vite") is not None
+    if busy:
+        info.state = "failed"
+    else:
+        info.state = "ready" if built else "missing"
+    return info
+
+
+def _tool_version(command: list[str]) -> str | None:
+    try:
+        result = _run(command, capture=True, check=False, announce=False, timeout=8)
+    except DeployError:
+        return None
+    if result.returncode != 0:
+        return None
+    output = (result.stdout or result.stderr).strip()
+    match = re.search(r"\d+(?:\.\d+)+", output)
+    return match.group(0) if match else ""
+
+
+def _probe_tools() -> list[_Item]:
+    items = [_Item("ready", "python", sys.version.split()[0])]
+    commands = (
+        ("docker", ["docker", "--version"]),
+        ("docker compose", ["docker", "compose", "version", "--short"]),
+        ("uv", ["uv", "--version"]),
+        ("node", ["node", "--version"]),
+        ("npm", ["npm", "--version"]),
+    )
+    for label, command in commands:
+        version = _tool_version(command)
+        if version is None:
+            items.append(_Item("failed", label, "not found"))
+        elif label == "node" and not (
+            version[:1].isdigit() and int(version.split(".")[0]) >= 18
+        ):
+            items.append(_Item("failed", label, f"{version} (needs >= 18)"))
+        else:
+            items.append(_Item("ready", label, version))
+    return items
+
+
+class _Monitor:
+    """后台探测线程：定期刷新每行状态、Docker 信息与工具版本。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._force = True
+        self._reload_meta = True
+        self._rows: dict[str, _RowInfo] = {}
+        self._docker = _DockerInfo()
+        self._meta = dict(_COMPOSE_DEFAULTS)
+        self._tools: list[_Item] = []
+
+    def start(self) -> None:
+        for target in (self._probe_loop, self._tools_loop):
+            threading.Thread(target=target, daemon=True).start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+
+    def refresh(self, reload_meta: bool = False) -> None:
+        self._force = True
+        self._reload_meta = self._reload_meta or reload_meta
+        self._wake.set()
+
+    def snapshot(
+        self,
+    ) -> tuple[
+        dict[str, _RowInfo], _DockerInfo, dict[str, tuple[str, str]], list[_Item]
+    ]:
+        with self._lock:
+            return dict(self._rows), self._docker, self._meta, list(self._tools)
+
+    @staticmethod
+    def _probe(
+        spec: _Spec, docker: _DockerInfo, meta: dict[str, tuple[str, str]]
+    ) -> _RowInfo:
         try:
-            input("\n按回车返回菜单 ...")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
+            return _probe_row(spec, docker, meta)
+        except Exception:  # noqa: BLE001
+            return _RowInfo("unknown")
+
+    def _probe_loop(self) -> None:
+        _silence()
+        docker = _DockerInfo()
+        meta = self._meta
+        docker_at = 0.0
+        with ThreadPoolExecutor(len(_SPECS), initializer=_silence) as pool:
+            while not self._stop.is_set():
+                self._wake.clear()
+                if self._reload_meta:
+                    self._reload_meta = False
+                    meta = _compose_meta(refresh=True)
+                if self._force or time.monotonic() - docker_at >= 5.0:
+                    self._force = False
+                    docker = _docker_info()
+                    docker_at = time.monotonic()
+                rows = list(
+                    pool.map(
+                        self._probe,
+                        _SPECS,
+                        [docker] * len(_SPECS),
+                        [meta] * len(_SPECS),
+                    )
+                )
+                with self._lock:
+                    self._rows = {s.key: row for s, row in zip(_SPECS, rows)}
+                    self._docker = docker
+                    self._meta = meta
+                self._wake.wait(2.0)
+
+    def _tools_loop(self) -> None:
+        _silence()
+        while not self._stop.is_set():
+            tools = _probe_tools()
+            with self._lock:
+                self._tools = tools
+            self._stop.wait(10.0)
+
+
+# ---------------------------------------------------------------------------
+# TUI：任务队列
+# ---------------------------------------------------------------------------
+
+
+@dataclass(eq=False)
+class _Job:
+    spec: _Spec
+    title: str
+    phase: str
+    fn: Callable[[], None]
+    group: object | None = None
+    state: str = "queued"  # queued | running | done | failed | cancelled
+    error: str = ""
+    tail: deque[str] = field(default_factory=lambda: deque(maxlen=60))
+    cancelled: bool = False
+    process: subprocess.Popen | None = None
+
+
+def _make_job(
+    action: str,
+    spec: _Spec,
+    *,
+    group: object | None = None,
+    force_build: bool = False,
+    final: bool = False,
+    volumes: bool = False,
+) -> _Job:
+    if action == "build":
+        return _Job(spec, "Build", "Building", lambda: _build_row(spec), group)
+    if action == "deploy":
+        phase = "Building" if force_build else "Deploying"
+        return _Job(
+            spec, "Deploy", phase, lambda: _deploy_row(spec, force_build), group
+        )
+    return _Job(
+        spec,
+        "Uninstall",
+        "Uninstalling",
+        lambda: _uninstall_row(spec, final, volumes),
+        group,
+    )
+
+
+class _Runner:
+    """单 worker 线程串行执行任务；输出写入 var/logs/deploy/<服务>.log。"""
+
+    def __init__(self, on_done: Callable[[], None]) -> None:
+        self._cond = threading.Condition()
+        self._queue: list[_Job] = []
+        self._current: _Job | None = None
+        self._last: _Job | None = None
+        self._failed: dict[str, _Job] = {}
+        self._failures: deque[_Job] = deque()
+        self._closed = False
+        self._on_done = on_done
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def submit(self, jobs: Sequence[_Job]) -> None:
+        with self._cond:
+            for job in jobs:
+                self._failed.pop(job.spec.key, None)
+                self._queue.append(job)
+            self._cond.notify()
+
+    def has_row(self, key: str) -> bool:
+        with self._cond:
+            if self._current is not None and self._current.spec.key == key:
+                return True
+            return any(job.spec.key == key for job in self._queue)
+
+    def view(self) -> dict[str, tuple[str, _Job]]:
+        with self._cond:
+            result = {key: ("failed", job) for key, job in self._failed.items()}
+            for job in self._queue:
+                result[job.spec.key] = ("queued", job)
+            if self._current is not None:
+                result[self._current.spec.key] = ("running", self._current)
+            return result
+
+    def counts(self) -> tuple[_Job | None, int]:
+        with self._cond:
+            return self._current, len(self._queue)
+
+    def latest(self) -> _Job | None:
+        with self._cond:
+            return self._current or self._last
+
+    def busy(self) -> bool:
+        with self._cond:
+            return self._current is not None or bool(self._queue)
+
+    def pop_failure(self) -> _Job | None:
+        with self._cond:
+            return self._failures.popleft() if self._failures else None
+
+    def cancel_all(self) -> None:
+        with self._cond:
+            for job in self._queue:
+                job.state = "cancelled"
+                job.cancelled = True
+            self._queue.clear()
+            job = self._current
+            if job is not None:
+                job.cancelled = True
+                if job.process is not None:
+                    _kill_process_group(job.process)
+
+    def close(self, timeout: float = 5.0) -> None:
+        self.cancel_all()
+        with self._cond:
+            self._closed = True
+            self._cond.notify()
+        self._thread.join(timeout)
+
+    def _loop(self) -> None:
+        while True:
+            with self._cond:
+                while not self._queue and not self._closed:
+                    self._cond.wait()
+                if self._closed:
+                    return
+                job = self._queue.pop(0)
+                job.state = "running"
+                self._current = job
+
+            self._execute(job)
+
+            with self._cond:
+                self._current = None
+                self._last = job
+                if job.state == "failed":
+                    self._failed[job.spec.key] = job
+                    self._failures.append(job)
+                    if job.group is not None:
+                        rest = []
+                        for other in self._queue:
+                            if other.group is job.group:
+                                other.state = "cancelled"
+                                other.cancelled = True
+                            else:
+                                rest.append(other)
+                        self._queue = rest
+            self._on_done()
+
+    def _execute(self, job: _Job) -> None:
+        try:
+            DEPLOY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            handle = (DEPLOY_LOG_DIR / f"{job.spec.log_name}.log").open(
+                "a", encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            handle = None
+
+        def sink(line: str) -> None:
+            job.tail.append(line)
+            if handle is not None:
+                handle.write(line + "\n")
+                handle.flush()
+
+        _CTX.sink = sink
+        _CTX.job = job
+        try:
+            if handle is not None:
+                handle.write("\n")
+            sink(
+                f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                f"{job.title} - {job.spec.name} ====="
+            )
+            job.fn()
+            job.state = "cancelled" if job.cancelled else "done"
+        except DeployError as exc:
+            if job.cancelled:
+                job.state = "cancelled"
+            else:
+                job.state = "failed"
+                job.error = str(exc)
+                _error(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            job.state = "cancelled" if job.cancelled else "failed"
+            job.error = f"{type(exc).__name__}: {exc}"
+            sink(traceback.format_exc().rstrip())
+        finally:
+            _CTX.sink = None
+            _CTX.job = None
+            if handle is not None:
+                handle.close()
+
+
+# ---------------------------------------------------------------------------
+# TUI：文本与绘制工具
+# ---------------------------------------------------------------------------
+
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+_SYMBOLS_UNICODE = {
+    "tl": "╭",
+    "tr": "╮",
+    "bl": "╰",
+    "br": "╯",
+    "h": "─",
+    "v": "│",
+    "lt": "├",
+    "rt": "┤",
+    "tt": "┬",
+    "bt": "┴",
+    "x": "┼",
+    "online": "●",
+    "ready": "✓",
+    "failed": "✗",
+    "missing": "-",
+    "unknown": "·",
+    "queued": "…",
+    "ell": "…",
+    "spin": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
+}
+_SYMBOLS_ASCII = {
+    "tl": "+",
+    "tr": "+",
+    "bl": "+",
+    "br": "+",
+    "h": "-",
+    "v": "|",
+    "lt": "+",
+    "rt": "+",
+    "tt": "+",
+    "bt": "+",
+    "x": "+",
+    "online": "*",
+    "ready": "v",
+    "failed": "x",
+    "missing": "-",
+    "unknown": ".",
+    "queued": ".",
+    "ell": "...",
+    "spin": "|/-\\",
+}
+_STATE_COLOR = {
+    "online": "green",
+    "ready": "green",
+    "failed": "red",
+    "missing": "gray",
+    "unknown": "gray",
+}
+
+_MIN_HEIGHT = 20
+_MIN_WIDTH = 80
+
+
+def _clean(text: str) -> str:
+    text = _ANSI_RE.sub("", text).replace("\t", "    ")
+    return _CONTROL_RE.sub(" ", text)
+
+
+def _char_width(ch: str) -> int:
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1
+
+
+def _text_width(text: str) -> int:
+    return sum(_char_width(ch) for ch in text)
+
+
+def _clip_cols(text: str, width: int) -> str:
+    used = 0
+    out = []
+    for ch in text:
+        cols = _char_width(ch)
+        if used + cols > width:
+            break
+        out.append(ch)
+        used += cols
+    return "".join(out)
+
+
+def _wrap_lines(lines: Sequence[str], width: int) -> list[str]:
+    wrapped: list[str] = []
+    for line in lines:
+        line = _clean(line)
+        while _text_width(line) > width > 0:
+            piece = _clip_cols(line, width)
+            wrapped.append(piece)
+            line = line[len(piece) :]
+        wrapped.append(line)
+    return wrapped
+
+
+def _max_offset(text: str, width: int, ell: str = "…") -> int:
+    """text 在 width 列内显示时，最大的起始字符偏移（尾部恰好放下）。"""
+
+    if _text_width(text) <= width:
+        return 0
+    room = width - _text_width(ell)
+    used = 0
+    index = len(text)
+    while index > 0:
+        cols = _char_width(text[index - 1])
+        if used + cols > room:
+            break
+        used += cols
+        index -= 1
+    return index
+
+
+def _window(
+    text: str, width: int, offset: int = 0, ell: str = "…"
+) -> tuple[str, int, int, int]:
+    """截取 text 的一个窗口，返回 (显示文本, 修正后的偏移, 头部省略号长度, 尾部省略号长度)。"""
+
+    if width <= 0:
+        return "", 0, 0, 0
+    if _text_width(text) <= width:
+        return text, 0, 0, 0
+
+    max_offset = _max_offset(text, width, ell)
+    offset = max(0, min(offset, max_offset))
+    ell_cols = _text_width(ell)
+    head = ell if offset > 0 else ""
+    tail_reserved = 0 if offset >= max_offset else ell_cols
+    room = max(0, width - (ell_cols if head else 0) - tail_reserved)
+
+    body = []
+    used = 0
+    index = offset
+    while index < len(text):
+        cols = _char_width(text[index])
+        if used + cols > room:
+            break
+        body.append(text[index])
+        used += cols
+        index += 1
+    tail = ell if index < len(text) else ""
+    return head + "".join(body) + tail, offset, len(head), len(tail)
+
+
+def _fit(
+    segs: Sequence[tuple[str, int]],
+    width: int,
+    offset: int = 0,
+    ell_attr: int = 0,
+    ell: str = "…",
+) -> tuple[list[tuple[str, int]], int]:
+    """把带属性的文本片段按 _window 规则裁剪，省略号使用 ell_attr。"""
+
+    text = "".join(piece for piece, _ in segs)
+    attrs = [attr for piece, attr in segs for _ in piece]
+    shown, offset, head, tail = _window(text, width, offset, ell)
+    body = shown[head : len(shown) - tail]
+
+    out: list[tuple[str, int]] = []
+    if head:
+        out.append((shown[:head], ell_attr))
+    first = len(out)
+    for index, ch in enumerate(body):
+        attr = attrs[offset + index]
+        if len(out) > first and out[-1][1] == attr:
+            out[-1] = (out[-1][0] + ch, attr)
+        else:
+            out.append((ch, attr))
+    if tail:
+        out.append((shown[len(shown) - tail :], ell_attr))
+    return out, offset
+
+
+def _slice_segs(segs: Sequence[tuple[str, int]], start: int) -> list[tuple[str, int]]:
+    out = []
+    for piece, attr in segs:
+        if start >= len(piece):
+            start -= len(piece)
+            continue
+        out.append((piece[start:], attr))
+        start = 0
+    return out
+
+
+def _read_log(
+    path: Path, max_bytes: int = 512 * 1024, max_lines: int = 5000
+) -> list[str]:
+    """读取日志文件尾部，去除 ANSI 与控制字符，回车覆盖只保留最后一段。"""
+
+    try:
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read()
+    except OSError:
+        return []
+
+    text = data.decode("utf-8", errors="replace")
+    if size > max_bytes:
+        text = text.split("\n", 1)[-1]
+    lines = []
+    for raw in text.split("\n"):
+        parts = [part for part in raw.split("\r") if part]
+        lines.append(_clean(parts[-1] if parts else ""))
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines[-max_lines:]
+
+
+@dataclass
+class _Modal:
+    title: str
+    lines: list[str]
+    hint: str = ""
+    # 键名（小写字符、esc、enter、any）-> 处理函数；按下后弹窗关闭再执行
+    keys: dict[str, Callable[[], None]] = field(default_factory=dict)
+    danger: bool = False
+
+
+class _LogView:
+    """全屏日志查看器的状态。"""
+
+    def __init__(self, title: str, path: Path) -> None:
+        self.title = title
+        self.path = path
+        self.lines: list[str] = []
+        self.top = 0
+        self.left = 0
+        self.follow = True
+        self._sig: tuple[int, int] | None = None
+        self._checked = 0.0
+        self.reload(force=True)
+
+    def reload(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._checked < 0.5:
+            return
+        self._checked = now
+        try:
+            stat = self.path.stat()
+            sig = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            sig = None
+        if force or sig != self._sig:
+            self._sig = sig
+            self.lines = _read_log(self.path)
+
+
+# ---------------------------------------------------------------------------
+# TUI：界面
+# ---------------------------------------------------------------------------
+
+_Option = tuple[str, str, int | None]  # (键名, 描述, 热键下划线位置)
+
+
+def _key_name(key: int) -> str:
+    if key == 27:
+        return "esc"
+    if key in (10, 13, curses.KEY_ENTER):
+        return "enter"
+    if 32 <= key < 127:
+        return chr(key).lower()
+    return ""
+
+
+def _tail_lines(job: _Job, count: int) -> list[str]:
+    try:
+        return list(job.tail)[-count:] if count > 0 else []
+    except RuntimeError:
+        return []
+
+
+class _Tui:
+    """htop 风格的 curses 界面：Config / Environment / Deploy 三个页签。"""
+
+    TABS = ("Config", "Environment", "Deploy")
+    CONFIG, ENVIRONMENT, DEPLOY = 0, 1, 2
+
+    def __init__(self, scr, monitor: _Monitor, runner: _Runner) -> None:
+        self.scr = scr
+        self.monitor = monitor
+        self.runner = runner
+        self.h = self.w = 0
+        self.running = True
+        self.tab = self.DEPLOY
+        self.modal: _Modal | None = None
+        self.quit_modal: _Modal | None = None
+        self.log: _LogView | None = None
+        self.flash_text = ""
+        self.flash_until = 0.0
+        self.flash_error = False
+
+        self.sel = 0
+        self.col = 0
+        self.hoff = 0
+        self.cells: list[list[list[tuple[str, int]]]] = []
+        self.geo: list[tuple[int, int]] = []
+
+        self.panel = 0
+        self.psel = [0, 0, 0]
+        self.poff = 0
+        self.env_cells: list[list[list[tuple[str, int]]]] = [[], [], []]
+        self.env_widths = [1, 1, 1]
+
+        self.cfg_top = 0
+        self.cfg_left = 0
+        self._cfg_sig: object = ()
+        self._cfg_lines: list[str] | None = None
+
+        self._init_terminal()
+
+    # -- 初始化 -----------------------------------------------------------
+
+    def _init_terminal(self) -> None:
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        self.scr.keypad(True)
+        self.scr.timeout(100)
+
+        encoding = (locale.getpreferredencoding(False) or "").lower()
+        self.sym = _SYMBOLS_UNICODE if "utf" in encoding else _SYMBOLS_ASCII
+
+        a = {
+            "plain": 0,
+            "bold": curses.A_BOLD,
+            "rev": curses.A_REVERSE,
+            "ul": curses.A_UNDERLINE,
+            "yellow": curses.A_BOLD,
+            "green": 0,
+            "red": curses.A_BOLD,
+            "gray": curses.A_DIM,
+        }
+        if curses.has_colors():
+            try:
+                curses.start_color()
+                curses.use_default_colors()
+                wide = curses.COLORS >= 256
+                palette = {
+                    "yellow": 220 if wide else curses.COLOR_YELLOW,
+                    "green": 41 if wide else curses.COLOR_GREEN,
+                    "red": 203 if wide else curses.COLOR_RED,
+                    "gray": 245 if wide else None,
+                }
+                for index, (name, color) in enumerate(palette.items(), start=1):
+                    if color is not None:
+                        curses.init_pair(index, color, -1)
+                        a[name] = curses.color_pair(index)
+            except curses.error:
+                pass
+        self.a = a
+
+    # -- 绘制原语 ---------------------------------------------------------
+
+    def put(self, y: int, x: int, text: str, attr: int = 0) -> int:
+        if not text or y < 0 or y >= self.h or x < 0 or x >= self.w:
+            return x
+        clipped = _clip_cols(text, self.w - x)
+        try:
+            self.scr.addstr(y, x, clipped, attr)
+        except curses.error:
+            pass
+        return x + _text_width(clipped)
+
+    def cell(
+        self,
+        y: int,
+        x: int,
+        width: int,
+        segs: Sequence[tuple[str, int]],
+        offset: int = 0,
+        extra: int = 0,
+    ) -> int:
+        """在固定宽度内绘制文本，过长时省略；extra 为附加属性（如反色）。"""
+
+        parts, offset = _fit(segs, width, offset, self.a["gray"], self.sym["ell"])
+        end = x
+        for text, attr in parts:
+            end = self.put(y, end, text, attr | extra)
+        if extra and end < x + width:
+            self.put(y, end, " " * (x + width - end), extra)
+        return offset
+
+    def box(self, top: int, bottom: int) -> None:
+        s = self.sym
+        left, right = 1, self.w - 2
+        inner = right - left - 1
+        self.put(top, left, s["tl"] + s["h"] * inner + s["tr"])
+        for y in range(top + 1, bottom):
+            self.put(y, left, s["v"])
+            self.put(y, right, s["v"])
+        self.put(bottom, left, s["bl"] + s["h"] * inner + s["br"])
+
+    def divider(self, y: int, joins: Sequence[int] = ()) -> None:
+        s = self.sym
+        left, right = 1, self.w - 2
+        chars = [s["h"]] * (right - left - 1)
+        for x in joins:
+            chars[x - left - 1] = s["x"]
+        self.put(y, left, s["lt"] + "".join(chars) + s["rt"])
+
+    def _spin(self) -> str:
+        frames = self.sym["spin"]
+        return frames[int(time.monotonic() * 10) % len(frames)]
+
+    def _log_attr(self, line: str) -> int:
+        a = self.a
+        if line.startswith("[ fail ]"):
+            return a["red"]
+        if line.startswith("[ warn ]"):
+            return a["yellow"]
+        if line.startswith("[  ok  ]"):
+            return a["green"]
+        if line.startswith("=="):
+            return a["yellow"]
+        if line.startswith("[deploy]"):
+            return a["gray"]
+        return 0
+
+    def flash(self, text: str, *, error: bool = False, seconds: float = 3.0) -> None:
+        self.flash_text = text
+        self.flash_error = error
+        self.flash_until = time.monotonic() + seconds
+
+    # -- 通用栏位 ---------------------------------------------------------
+
+    def _draw_option(self, y: int, x: int, item: _Option) -> int:
+        key, desc, underline = item
+        a = self.a
+        if underline is None:
+            x = self.put(y, x, key)
+        else:
+            x = self.put(y, x, key[:underline])
+            x = self.put(y, x, key[underline], a["ul"])
+            x = self.put(y, x, key[underline + 1 :])
+        return self.put(y, x, desc, a["gray"])
+
+    def _draw_options(
+        self,
+        y: int,
+        left: Sequence[_Option],
+        right: Sequence[_Option] = (),
+        floor: int = 2,
+    ) -> None:
+        x = 2
+        for item in left:
+            x = self._draw_option(y, x, item) + 2
+        if not right:
+            return
+        width = sum(_text_width(k) + _text_width(d) for k, d, _ in right)
+        width += 3 * (len(right) - 1)
+        start = self.w - 2 - width
+        if start > max(x, floor):
+            for item in right:
+                start = self._draw_option(y, start, item) + 3
+
+    def _draw_nav(self) -> None:
+        a = self.a
+        x = 2
+        for index, name in enumerate(self.TABS):
+            base = a["rev"] if index == self.tab else 0
+            x = self.put(0, x, " ", base)
+            x = self.put(0, x, name[0], base | a["ul"])
+            x = self.put(0, x, name[1:] + " ", base) + 1
+        right = (("Tab", ": Switch Tabs", None), ("Q", ": Quit", None))
+        self._draw_options(0, (), right, floor=x)
+
+    def _draw_page_options(self) -> None:
+        y = self.h - 2
+        arrows = ("Arrow-keys", ": Navigation", None)
+        if self.tab == self.CONFIG:
+            self._draw_options(y, (("Enter", ": Edit", None),), (arrows,))
+        elif self.tab == self.ENVIRONMENT:
+            self._draw_options(
+                y,
+                (
+                    ("WASD", ": Switch Panels", None),
+                    ("Arrow-keys", ": Navigation in Panel", None),
+                ),
+            )
+        else:
+            self._draw_options(
+                y,
+                (
+                    ("(re)Build", "", 4),
+                    ("(re)Deploy", "", 6),
+                    ("Uninstall", "", 0),
+                    ("Deploy All", "", 7),
+                    ("Uninstall All", "", 1),
+                    ("Logs", "", 0),
+                    ("X", ": Cancel", None),
+                ),
+                (arrows,),
+            )
+
+    def _draw_status(self) -> None:
+        y = self.h - 1
+        a = self.a
+        if self.flash_text and time.monotonic() < self.flash_until:
+            attr = a["red"] if self.flash_error else a["yellow"]
+            self.put(y, 2, _clean(self.flash_text), attr)
+            return
+        job, queued = self.runner.counts()
+        if job is None and not queued:
+            self.put(y, 2, "Idle", a["gray"])
+            return
+        x = 2
+        if job is not None:
+            x = self.put(y, x, self._spin() + " ", a["yellow"])
+            x = self.put(y, x, f"{job.phase} {job.spec.name}")
+        if queued:
+            self.put(y, x, f"  {queued} queued", a["gray"])
+
+    # -- Deploy 页 --------------------------------------------------------
+
+    def _geometry(self) -> list[tuple[int, int]]:
+        iw = self.w - 4
+        url_w = max(24, min(30, iw - 54))
+        docker_w = max(8, iw - 30 - url_w)
+        return [(10, 18), (30, url_w), (32 + url_w, docker_w)]
+
+    def _row_view(
+        self, spec: _Spec, info: _RowInfo, state: tuple[str, _Job] | None
+    ) -> tuple[str, int, list[tuple[str, int]]]:
+        a, s = self.a, self.sym
+        if state is not None:
+            kind, job = state
+            if kind == "running":
+                return self._spin(), a["yellow"], [(f"{job.phase}...", a["yellow"])]
+            if kind == "queued":
+                return s["queued"], a["gray"], [("Queued...", a["gray"])]
+            first = (job.error.splitlines() or [""])[0]
+            return s["failed"], a["red"], [(f"Failed: {_clean(first)}", a["red"])]
+        if spec.kind == "ai":
+            return s["missing"], a["gray"], [("Not implemented", a["gray"])]
+        attr = 0 if info.state == "online" else a["gray"]
+        icon = a[_STATE_COLOR[info.state]]
+        return s[info.state], icon, [(_clean(info.url), attr)]
+
+    def _draw_deploy(self, top: int, bottom: int) -> None:
+        a = self.a
+        rows, _docker, meta, _tools = self.monitor.snapshot()
+        view = self.runner.view()
+        self.geo = self._geometry()
+
+        self.put(top + 1, 2, "Status", a["yellow"])
+        for (x, _width), title in zip(self.geo, ("Service Name", "URL", "Docker")):
+            self.put(top + 1, x, title, a["yellow"])
+        self.divider(top + 2)
+
+        self.sel = max(0, min(self.sel, len(_SPECS) - 1))
+        self.cells = []
+        for index, spec in enumerate(_SPECS):
+            y = top + 3 + index
+            icon, icon_attr, url = self._row_view(
+                spec, rows.get(spec.key, _RowInfo()), view.get(spec.key)
+            )
+            self.put(y, 4, icon, icon_attr)
+            docker_text = _docker_text(spec, meta)
+            cells = [
+                [(spec.name, 0)],
+                url,
+                [(docker_text, a["gray"])] if docker_text else [],
+            ]
+            self.cells.append(cells)
+            for col, ((x, width), segs) in enumerate(zip(self.geo, cells)):
+                focused = index == self.sel and col == self.col
+                offset = self.cell(
+                    y,
+                    x,
+                    width,
+                    segs,
+                    self.hoff if focused else 0,
+                    a["rev"] if focused else 0,
+                )
+                if focused:
+                    self.hoff = offset
+
+        pane = top + 3 + len(_SPECS)
+        height = bottom - pane - 1
+        if height < 3:
+            return
+        job = self.runner.latest()
+        title = "Output"
+        if job is not None:
+            title = f"Output - {job.spec.name} - {job.title} ({job.state})"
+        self.divider(pane)
+        self.put(pane, 3, f" {title} ", a["yellow"])
+        lines = _tail_lines(job, height) if job is not None else []
+        if not lines:
+            self.put(pane + 1, 2, "No task output yet.", a["gray"])
+        for index, line in enumerate(lines):
+            text = _clip_cols(_clean(line), self.w - 4)
+            self.put(pane + 1 + index, 2, text, self._log_attr(line))
+
+    # -- Environment 页 ---------------------------------------------------
+
+    def _env_items(self) -> tuple[list[_Item], list[_Item], list[_Item]]:
+        rows, docker, meta, tools = self.monitor.snapshot()
+        ports = []
+        for spec in _SPECS:
+            try:
+                _host, port = _endpoint(spec)
+            except DeployError:
+                continue
+            info = rows.get(spec.key)
+            if spec.kind == "ai":
+                state = "missing"
+            elif info is None:
+                state = "unknown"
+            elif info.state == "online":
+                state = "online"
+            elif info.listening:
+                state = "failed"
+            else:
+                state = "ready"
+            ports.append(_Item(state, str(port), spec.name))
+        ports.sort(key=lambda item: int(item.main))
+
+        environment = list(tools)
+        if tools and docker.probed:
+            daemon = _Item(
+                "ready" if docker.ok else "failed",
+                "docker daemon",
+                "running" if docker.ok else "not running",
+            )
+            environment.insert(3, daemon)
+
+        images = []
+        for service in ("app", "postgres", "redis"):
+            image = meta[service][0]
+            if not docker.probed:
+                state = "unknown"
+            else:
+                state = "ready" if image in docker.images else "missing"
+            images.append(_Item(state, image))
+        return ports, environment, images
+
+    def _draw_environment(self, top: int, bottom: int) -> None:
+        a, s = self.a, self.sym
+        groups = self._env_items()
+        titles = ("port", "environment", "docker image")
+        base, extra = divmod(self.w - 6, 3)
+        widths = [base + (1 if index < extra else 0) for index in range(3)]
+        xs = [2, 3 + widths[0], 4 + widths[0] + widths[1]]
+        seps = [xs[1] - 1, xs[2] - 1]
+
+        for sx in seps:
+            for y in range(top + 1, bottom):
+                self.put(y, sx, s["v"])
+            self.put(top, sx, s["tt"])
+            self.put(bottom, sx, s["bt"])
+        self.divider(top + 2, joins=seps)
+
+        self.env_cells = [[], [], []]
+        self.env_widths = [max(1, width - 4) for width in widths]
+        for panel, (title, items) in enumerate(zip(titles, groups)):
+            px, pw = xs[panel], widths[panel]
+            active = panel == self.panel
+            self.put(
+                top + 1,
+                px,
+                f" {title} ",
+                a["yellow"] | (a["rev"] if active else 0),
+            )
+            self.psel[panel] = max(0, min(self.psel[panel], len(items) - 1))
+            if not items:
+                self.put(top + 3, px + 1, "Probing...", a["gray"])
+                continue
+            for index, item in enumerate(items):
+                segs = [(item.main, 0)]
+                if item.sub:
+                    segs.append((" " + item.sub, a["gray"]))
+                self.env_cells[panel].append(segs)
+                y = top + 3 + index
+                if y >= bottom:
+                    continue
+                self.put(y, px + 1, s[item.state], a[_STATE_COLOR[item.state]])
+                focused = active and index == self.psel[panel]
+                offset = self.cell(
+                    y,
+                    px + 3,
+                    pw - 4,
+                    segs,
+                    self.poff if focused else 0,
+                    a["rev"] if focused else 0,
+                )
+                if focused:
+                    self.poff = offset
+
+    # -- Config 页 --------------------------------------------------------
+
+    def _config_lines(self) -> list[str] | None:
+        try:
+            stat = ENV_FILE.stat()
+            sig: object = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            sig = None
+        if sig != self._cfg_sig:
+            self._cfg_sig = sig
+            try:
+                text = ENV_FILE.read_text(encoding="utf-8", errors="replace")
+                self._cfg_lines = [_clean(line) for line in text.splitlines()]
+            except OSError:
+                self._cfg_lines = None
+        return self._cfg_lines
+
+    def _env_segments(self, line: str) -> list[tuple[str, int]]:
+        a = self.a
+        if line.lstrip().startswith("#"):
+            return [(line, a["gray"])]
+        key, sep, value = line.partition("=")
+        if sep and key.strip():
+            return [(key, a["yellow"]), (sep + value, 0)]
+        return [(line, 0)]
+
+    def _draw_config(self, top: int, bottom: int) -> None:
+        a = self.a
+        lines = self._config_lines()
+        width = self.w - 4
+
+        path = str(ENV_FILE)
+        if _text_width(path) > width:
+            ell = self.sym["ell"]
+            while path and _text_width(ell + path) > width:
+                path = path[1:]
+            path = ell + path
+        self.put(top + 1, 2, path, a["bold"])
+        self.divider(top + 2)
+
+        if lines is None:
+            message = "File not found. Press Enter to create it from .env.example."
+            self.put(top + 3, 2, message, a["gray"])
+            return
+
+        rows = bottom - top - 3
+        self.cfg_top = max(0, min(self.cfg_top, max(0, len(lines) - rows)))
+        longest = max((len(line) for line in lines), default=0)
+        self.cfg_left = max(0, min(self.cfg_left, max(0, longest - width + 1)))
+        for index in range(rows):
+            number = self.cfg_top + index
+            if number >= len(lines):
+                break
+            segs = _slice_segs(self._env_segments(lines[number]), self.cfg_left)
+            self.cell(top + 3 + index, 2, width, segs)
+
+        counter = f" {min(self.cfg_top + rows, len(lines))}/{len(lines)} "
+        self.put(bottom, self.w - 3 - len(counter), counter, a["gray"])
+
+    # -- 弹窗、日志与整体绘制 ---------------------------------------------
+
+    def _draw_modal(self) -> None:
+        modal, a, s = self.modal, self.a, self.sym
+        if modal is None:
+            return
+        want = max(
+            [_text_width(line) for line in modal.lines]
+            + [_text_width(modal.title) + 2, _text_width(modal.hint), 36]
+        )
+        inner = min(want, min(self.w - 8, 100))
+        lines = _wrap_lines(modal.lines, inner)[-max(1, self.h - 9) :]
+        width = inner + 4
+        height = len(lines) + 5
+        x0 = (self.w - width) // 2
+        y0 = (self.h - height) // 2
+
+        for y in range(height):
+            self.put(y0 + y, x0, " " * width)
+        self.put(y0, x0, s["tl"] + s["h"] * (width - 2) + s["tr"])
+        for y in range(1, height - 1):
+            self.put(y0 + y, x0, s["v"])
+            self.put(y0 + y, x0 + width - 1, s["v"])
+        self.put(y0 + height - 1, x0, s["bl"] + s["h"] * (width - 2) + s["br"])
+        self.put(y0, x0 + 2, f" {modal.title} ", a["red" if modal.danger else "yellow"])
+        for index, line in enumerate(lines):
+            text = _clip_cols(line, inner)
+            self.put(y0 + 2 + index, x0 + 2, text, self._log_attr(line))
+        self.put(y0 + height - 2, x0 + 2, _clip_cols(modal.hint, inner), a["gray"])
+
+    def _draw_log(self) -> None:
+        view, a = self.log, self.a
+        if view is None:
+            return
+        view.reload()
+        rows = self.h - 2
+        max_top = max(0, len(view.lines) - rows)
+        if view.follow:
+            view.top = max_top
+        view.top = max(0, min(view.top, max_top))
+        longest = max((len(line) for line in view.lines), default=0)
+        view.left = max(0, min(view.left, max(0, longest - (self.w - 4) + 1)))
+
+        total = len(view.lines)
+        state = "FOLLOW" if view.follow else "PAUSED"
+        right = f"{state}  {min(view.top + rows, total)}/{total}"
+        x = self.put(0, 2, "Log: ", a["yellow"])
+        x = self.put(0, x, view.title, a["bold"]) + 2
+        room = self.w - 4 - len(right) - x
+        self.put(0, x, _clip_cols(_rel(view.path), room), a["gray"])
+        self.put(
+            0, self.w - 2 - len(right), right, a["green"] if view.follow else a["gray"]
+        )
+
+        if not view.lines:
+            self.put(1, 2, "No log yet.", a["gray"])
+        for index in range(rows):
+            number = view.top + index
+            if number >= total:
+                break
+            line = view.lines[number]
+            text = _clip_cols(line[view.left :], self.w - 4)
+            self.put(1 + index, 2, text, self._log_attr(line))
+        self._draw_options(
+            self.h - 1,
+            (
+                ("Arrow-keys", ": Scroll", None),
+                ("PgUp/PgDn", "", None),
+                ("Home/End", "", None),
+                ("F", ": Follow", None),
+                ("Esc", ": Back", None),
+            ),
+        )
+
+    def _draw_small(self) -> None:
+        text = (
+            f"Terminal too small ({self.w}x{self.h}); need {_MIN_WIDTH}x{_MIN_HEIGHT}."
+        )
+        for index, line in enumerate(_wrap_lines([text, "Q: Quit"], max(10, self.w))):
+            self.put(index, 0, line)
+
+    def draw(self) -> None:
+        self.h, self.w = self.scr.getmaxyx()
+        self.scr.erase()
+        if self.h < _MIN_HEIGHT or self.w < _MIN_WIDTH:
+            self._draw_small()
+        else:
+            if self.log is not None:
+                self._draw_log()
+            else:
+                top, bottom = 1, self.h - 3
+                self._draw_nav()
+                self.box(top, bottom)
+                pages = (self._draw_config, self._draw_environment, self._draw_deploy)
+                pages[self.tab](top, bottom)
+                self._draw_page_options()
+                self._draw_status()
+            self._draw_modal()
+        self.scr.refresh()
+
+    # -- 按键处理 ---------------------------------------------------------
+
+    def handle(self, key: int) -> None:
+        if key == curses.KEY_RESIZE:
+            return
+        if self.modal is not None:
+            self._handle_modal(key)
+            return
+        name = _key_name(key)
+        if self.h < _MIN_HEIGHT or self.w < _MIN_WIDTH:
+            if name == "q":
+                self.request_quit()
+            return
+        if self.log is not None:
+            self._handle_log(key, name)
+            return
+        if name == "q":
+            self.request_quit()
+        elif key == 9:
+            self._switch_tab((self.tab + 1) % len(self.TABS))
+        elif key == curses.KEY_BTAB:
+            self._switch_tab((self.tab - 1) % len(self.TABS))
+        elif name in {"c", "e"} or (name == "d" and self.tab != self.ENVIRONMENT):
+            self._switch_tab("ced".index(name))
+        elif self.tab == self.CONFIG:
+            self._handle_config(key, name)
+        elif self.tab == self.ENVIRONMENT:
+            self._handle_environment(key, name)
+        else:
+            self._handle_deploy(key, name)
+
+    def _switch_tab(self, tab: int) -> None:
+        if tab != self.tab:
+            self.tab = tab
+            self.hoff = self.poff = 0
+
+    def _handle_modal(self, key: int) -> None:
+        modal = self.modal
+        if modal is None:
+            return
+        name = _key_name(key)
+        handler = modal.keys.get(name) if name else None
+        if handler is None:
+            handler = modal.keys.get("any")
+        if handler is None:
+            return
+        self.modal = None
+        self.quit_modal = None
+        handler()
+
+    def _handle_config(self, key: int, name: str) -> None:
+        page = max(1, self.h - 8)
+        if key == curses.KEY_UP:
+            self.cfg_top -= 1
+        elif key == curses.KEY_DOWN:
+            self.cfg_top += 1
+        elif key == curses.KEY_PPAGE:
+            self.cfg_top -= page
+        elif key == curses.KEY_NPAGE:
+            self.cfg_top += page
+        elif key == curses.KEY_HOME:
+            self.cfg_top = 0
+        elif key == curses.KEY_END:
+            self.cfg_top = 1 << 30
+        elif key == curses.KEY_LEFT:
+            self.cfg_left = max(0, self.cfg_left - 8)
+        elif key == curses.KEY_RIGHT:
+            self.cfg_left += 8
+        elif name == "enter":
+            self._edit_config()
+        self.cfg_top = max(0, self.cfg_top)
+
+    def _handle_environment(self, key: int, name: str) -> None:
+        count = len(self.env_cells)
+        if name in {"w", "a"}:
+            self._set_panel(max(0, self.panel - 1))
+        elif name in {"s", "d"}:
+            self._set_panel(min(count - 1, self.panel + 1))
+        elif key in {curses.KEY_UP, curses.KEY_DOWN, curses.KEY_HOME, curses.KEY_END}:
+            last = max(0, len(self.env_cells[self.panel]) - 1)
+            current = self.psel[self.panel]
+            target = {
+                curses.KEY_UP: current - 1,
+                curses.KEY_DOWN: current + 1,
+                curses.KEY_HOME: 0,
+                curses.KEY_END: last,
+            }[key]
+            self.psel[self.panel] = max(0, min(last, target))
+            self.poff = 0
+        elif key in {curses.KEY_LEFT, curses.KEY_RIGHT}:
+            step = max(1, self.env_widths[self.panel] // 2)
+            delta = step if key == curses.KEY_RIGHT else -step
+            self.poff = max(0, self.poff + delta)
+
+    def _set_panel(self, panel: int) -> None:
+        if panel != self.panel:
+            self.panel = panel
+            self.poff = 0
+
+    def _handle_deploy(self, key: int, name: str) -> None:
+        last = len(_SPECS) - 1
+        if key in {curses.KEY_UP, curses.KEY_DOWN, curses.KEY_HOME, curses.KEY_END}:
+            target = {
+                curses.KEY_UP: self.sel - 1,
+                curses.KEY_DOWN: self.sel + 1,
+                curses.KEY_HOME: 0,
+                curses.KEY_END: last,
+            }[key]
+            self.sel = max(0, min(last, target))
+            self.hoff = 0
+        elif key in {curses.KEY_PPAGE, curses.KEY_NPAGE}:
+            self.sel = 0 if key == curses.KEY_PPAGE else last
+            self.hoff = 0
+        elif key == curses.KEY_LEFT:
+            self._deploy_horizontal(-1)
+        elif key == curses.KEY_RIGHT:
+            self._deploy_horizontal(1)
+        elif name == "b":
+            self._act_row("build")
+        elif name == "p":
+            self._act_row("deploy")
+        elif name == "u":
+            self._act_row("uninstall")
+        elif name == "a":
+            self._deploy_all()
+        elif name == "n":
+            self._uninstall_all()
+        elif name == "l":
+            self._open_log(_SPECS[self.sel])
+        elif name == "x":
+            self._cancel()
+
+    def _deploy_horizontal(self, direction: int) -> None:
+        """在三个单元格间移动；被截断的单元格先滚动文本，到边界再换格。"""
+
+        if self.sel >= len(self.cells) or len(self.geo) != 3:
+            return
+
+        def span(col: int) -> tuple[str, int]:
+            text = "".join(piece for piece, _ in self.cells[self.sel][col])
+            return text, self.geo[col][1]
+
+        text, width = span(self.col)
+        ell = self.sym["ell"]
+        step = max(1, width // 2)
+        limit = _max_offset(text, width, ell)
+        if direction > 0:
+            if self.hoff < limit:
+                self.hoff = min(limit, self.hoff + step)
+            elif self.col < 2:
+                self.col += 1
+                self.hoff = 0
+        elif self.hoff > 0:
+            self.hoff = max(0, self.hoff - step)
+        elif self.col > 0:
+            self.col -= 1
+            text, width = span(self.col)
+            self.hoff = _max_offset(text, width, ell)
+
+    def _handle_log(self, key: int, name: str) -> None:
+        view = self.log
+        if view is None:
+            return
+        rows = self.h - 2
+        max_top = max(0, len(view.lines) - rows)
+        top = max_top if view.follow else view.top
+        if name in {"esc", "q", "l"}:
+            self.log = None
+            return
+        if name == "f":
+            view.follow = not view.follow
+            return
+        if key == curses.KEY_UP:
+            top -= 1
+        elif key == curses.KEY_DOWN:
+            top += 1
+        elif key == curses.KEY_PPAGE:
+            top -= max(1, rows - 1)
+        elif key == curses.KEY_NPAGE:
+            top += max(1, rows - 1)
+        elif key == curses.KEY_HOME:
+            top = 0
+        elif key == curses.KEY_END:
+            top = max_top
+        elif key == curses.KEY_LEFT:
+            view.left = max(0, view.left - 8)
+            return
+        elif key == curses.KEY_RIGHT:
+            view.left += 8
+            return
+        else:
+            return
+        view.top = max(0, min(top, max_top))
+        view.follow = view.top >= max_top
+
+    # -- 动作 -------------------------------------------------------------
+
+    def _act_row(self, action: str) -> None:
+        spec = _SPECS[self.sel]
+        if spec.kind == "ai":
+            self.flash("ai-service is not implemented yet.")
+        elif self.runner.has_row(spec.key):
+            self.flash(f"{spec.name} already has a pending task.")
+        else:
+            self.runner.submit([_make_job(action, spec)])
+
+    def _deploy_all(self) -> None:
+        group = object()
+        jobs = [
+            _make_job("deploy", _SPEC_BY_KEY[key], group=group, force_build=True)
+            for key in _DEPLOY_ORDER
+            if not self.runner.has_row(key)
+        ]
+        if not jobs:
+            self.flash("Nothing to deploy: all services already have pending tasks.")
+            return
+        self.runner.submit(jobs)
+        self.flash(f"Deploy All: {len(jobs)} tasks queued.")
+
+    def _uninstall_all(self) -> None:
+        if any(self.runner.has_row(key) for key in _UNINSTALL_ORDER):
+            self.flash("Some services still have pending tasks. Wait or press X.")
+            return
+
+        def start(volumes: bool) -> None:
+            group = object()
+            jobs = [
+                _make_job(
+                    "uninstall",
+                    _SPEC_BY_KEY[key],
+                    group=group,
+                    final=key == _UNINSTALL_ORDER[-1],
+                    volumes=volumes,
+                )
+                for key in _UNINSTALL_ORDER
+            ]
+            self.runner.submit(jobs)
+            self.flash(f"Uninstall All: {len(jobs)} tasks queued.")
+
+        def noop() -> None:
+            pass
+
+        self.modal = _Modal(
+            "Uninstall All",
+            [
+                "Stop and remove every deployed service.",
+                "",
+                "Y  Uninstall, keep PostgreSQL / Redis data",
+                "V  Uninstall and DELETE data volumes",
+                "N  Cancel",
+            ],
+            "Y / V / N",
+            {
+                "y": lambda: start(False),
+                "v": lambda: start(True),
+                "n": noop,
+                "esc": noop,
+            },
+            danger=True,
+        )
+
+    def _cancel(self) -> None:
+        if self.runner.busy():
+            self.runner.cancel_all()
+            self.flash("Cancelling tasks...")
+        else:
+            self.flash("No running tasks.")
+
+    def _open_log(self, spec: _Spec) -> None:
+        self.log = _LogView(spec.name, DEPLOY_LOG_DIR / f"{spec.log_name}.log")
+
+    def _show_failure(self, job: _Job) -> None:
+        spec = job.spec
+
+        def noop() -> None:
+            pass
+
+        self.modal = _Modal(
+            f"{job.title} failed: {spec.name}",
+            _tail_lines(job, 12) or [job.error],
+            "L: Full log   Any other key: Close",
+            {"l": lambda: self._open_log(spec), "any": noop},
+            danger=True,
+        )
+
+    def _edit_config(self) -> None:
+        if not ENV_FILE.exists():
+            try:
+                create_env()
+            except (DeployError, OSError) as exc:
+                self.flash(f"Cannot create .env: {exc}", error=True)
+                return
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        try:
+            command = shlex.split(editor)
+        except ValueError:
+            command = [editor]
+
+        problem = ""
+        curses.def_prog_mode()
+        curses.endwin()
+        try:
+            subprocess.call([*command, str(ENV_FILE)])
+        except OSError as exc:
+            problem = f"Cannot run editor {editor!r}: {exc}"
+        except KeyboardInterrupt:
+            pass
+        finally:
+            curses.reset_prog_mode()
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            self.scr.clear()
+
+        load_env(refresh=True)
+        self.monitor.refresh(reload_meta=True)
+        if problem:
+            self.flash(problem, error=True, seconds=6.0)
+        else:
+            self.flash("Config reloaded.")
+
+    def request_quit(self) -> None:
+        if not self.runner.busy():
+            self.running = False
+            return
+
+        def leave() -> None:
+            self.running = False
+
+        def noop() -> None:
+            pass
+
+        self.modal = self.quit_modal = _Modal(
+            "Quit",
+            [
+                "Tasks are still running.",
+                "Quitting cancels them (background services keep running).",
+            ],
+            "Y: Quit   N / Esc: Stay",
+            {"y": leave, "n": noop, "esc": noop},
+            danger=True,
+        )
+
+    # -- 主循环 -----------------------------------------------------------
+
+    def _tick(self) -> None:
+        if self.modal is None and self.log is None:
+            job = self.runner.pop_failure()
+            if job is not None:
+                self._show_failure(job)
+
+    def run(self) -> None:
+        while self.running:
+            try:
+                self.draw()
+                key = self.scr.getch()
+                if key != -1:
+                    self.handle(key)
+                self._tick()
+            except KeyboardInterrupt:
+                if self.quit_modal is not None and self.modal is self.quit_modal:
+                    self.running = False
+                else:
+                    self.request_quit()
+
+
+def _tui_main(scr, monitor: _Monitor, runner: _Runner) -> None:
+    _Tui(scr, monitor, runner).run()
+
+
+def _run_tui() -> int:
+    """无参数运行时的交互界面入口。"""
+
+    if curses is None:
+        _error("当前 Python 不支持 curses（Windows 可安装 windows-curses）。")
+        _info("请改用命令行参数，详见 python deploy.py --help")
+        return 1
+
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass
+    os.environ.setdefault("ESCDELAY", "25")
+
+    _CTX.sink = _discard
+    monitor = _Monitor()
+    runner = _Runner(on_done=monitor.refresh)
+    try:
+        load_env(refresh=True)
+        monitor.start()
+        curses.wrapper(_tui_main, monitor, runner)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _CTX.sink = None
+        runner.close()
+        monitor.stop()
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1434,7 +3430,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "服务名称：ecommerce、customer、ai、frontend、all\n"
-            "不带参数运行进入交互式菜单。"
+            "不带参数运行进入 TUI 交互界面。"
         ),
     )
     subparsers = parser.add_subparsers(dest="command", metavar="命令")
@@ -1491,10 +3487,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command is None:
-        if not sys.stdin.isatty():
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
             parser.print_help()
             return 2
-        return _interactive_menu()
+        return _run_tui()
 
     command = {
         "check": "status",
