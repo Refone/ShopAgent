@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """ShopAgent 一键式部署脚本。
 
 不带参数运行时进入 htop 风格的 TUI；带子命令时用于 CI 等非交互场景，例如：
@@ -1518,7 +1519,7 @@ class _Target:
 
 @dataclass(frozen=True)
 class _Spec(_Target):
-    """Deploy 页的一行：一个可构建、部署、卸载的服务。"""
+    """Status 页的一行：一个可构建、部署、卸载的服务。"""
 
     kind: str  # ecommerce | customer | ai | frontend | infra
     service: str = ""  # compose 服务名
@@ -1659,11 +1660,11 @@ def _row_url(spec: _Spec, host: str, port: int) -> str:
 
 def _docker_text(spec: _Spec, meta: dict[str, tuple[str, str]]) -> str:
     if spec.kind == "ecommerce":
-        return ", ".join(meta[service][1] for service in ("app", "postgres", "redis"))
+        return ", ".join(meta[service][0] for service in ("app", "postgres", "redis"))
     if spec.kind == "customer":
-        return meta["postgres"][1]
+        return meta["postgres"][0]
     if spec.kind == "infra":
-        return meta[spec.service][1]
+        return meta[spec.service][0]
     return ""
 
 
@@ -2605,10 +2606,11 @@ def _tail_lines(job: _Job, count: int) -> list[str]:
 
 
 class _Tui:
-    """htop 风格的 curses 界面：Config / Environment / Deploy 三个页签。"""
+    """htop 风格的 curses 界面：Status / Config / Environment 三个页签。"""
 
-    TABS = ("Config", "Environment", "Deploy")
-    CONFIG, ENVIRONMENT, DEPLOY = 0, 1, 2
+    TABS = ("Status", "Config", "Environment")
+    TAB_KEYS = ("q", "w", "e")
+    STATUS, CONFIG, ENVIRONMENT = 0, 1, 2
 
     def __init__(self, scr, monitor: _Monitor, runner: _Runner) -> None:
         self.scr = scr
@@ -2616,7 +2618,7 @@ class _Tui:
         self.runner = runner
         self.h = self.w = 0
         self.running = True
-        self.tab = self.DEPLOY
+        self.tab = self.STATUS
         self.modal: _Modal | None = None
         self.quit_modal: _Modal | None = None
         self.log: _LogView | None = None
@@ -2664,6 +2666,8 @@ class _Tui:
             "green": 0,
             "red": curses.A_BOLD,
             "gray": curses.A_DIM,
+            "white": curses.A_BOLD,
+            "tab_active": curses.A_REVERSE,
         }
         if curses.has_colors():
             try:
@@ -2675,11 +2679,19 @@ class _Tui:
                     "green": 41 if wide else curses.COLOR_GREEN,
                     "red": 203 if wide else curses.COLOR_RED,
                     "gray": 245 if wide else None,
+                    "white": 231 if wide else curses.COLOR_WHITE,
                 }
                 for index, (name, color) in enumerate(palette.items(), start=1):
                     if color is not None:
                         curses.init_pair(index, color, -1)
                         a[name] = curses.color_pair(index)
+                tab_pair = len(palette) + 1
+                curses.init_pair(
+                    tab_pair,
+                    curses.COLOR_BLACK,
+                    231 if wide else curses.COLOR_WHITE,
+                )
+                a["tab_active"] = curses.color_pair(tab_pair)
             except curses.error:
                 pass
         self.a = a
@@ -2779,11 +2791,11 @@ class _Tui:
         key, desc, underline = item
         a = self.a
         if underline is None:
-            x = self.put(y, x, key)
+            x = self.put(y, x, key, a["white"])
         else:
-            x = self.put(y, x, key[:underline])
-            x = self.put(y, x, key[underline], a["ul"])
-            x = self.put(y, x, key[underline + 1 :])
+            x = self.put(y, x, key[:underline], a["white"])
+            x = self.put(y, x, key[underline], a["white"] | a["ul"])
+            x = self.put(y, x, key[underline + 1 :], a["white"])
         return self.put(y, x, desc, a["gray"])
 
     def _draw_options(
@@ -2794,8 +2806,16 @@ class _Tui:
         floor: int = 2,
     ) -> None:
         x = 2
+        gap = 2
+        if left and (
+            x
+            + sum(_text_width(key) + _text_width(desc) for key, desc, _ in left)
+            + gap * (len(left) - 1)
+            > self.w
+        ):
+            gap = 1
         for item in left:
-            x = self._draw_option(y, x, item) + 2
+            x = self._draw_option(y, x, item) + gap
         if not right:
             return
         width = sum(_text_width(k) + _text_width(d) for k, d, _ in right)
@@ -2809,52 +2829,65 @@ class _Tui:
         a = self.a
         x = 2
         for index, name in enumerate(self.TABS):
-            base = a["rev"] if index == self.tab else 0
-            hot = 2 if index == self.DEPLOY else 0
-            x = self.put(0, x, " " + name[:hot], base)
-            x = self.put(0, x, name[hot], base | a["ul"])
-            x = self.put(0, x, name[hot + 1 :] + " ", base) + 1
-        tab_hint = ": Switch Tabs" if self.w >= 90 else ""
+            if index:
+                x = self.put(0, x, " ")
+            active = index == self.tab
+            text_attr = a["tab_active"] if active else a["white"]
+            hint_attr = a["tab_active"] if active else a["gray"]
+            x = self.put(0, x, name, text_attr)
+            x = self.put(0, x, f"({self.TAB_KEYS[index].upper()})", hint_attr)
         right = (
             ("Arrow-keys", ": Navigation", None),
-            ("Tab", tab_hint, None),
-            ("Q", ": Quit", None),
+            ("Esc", ": Quit", None),
         )
         self._draw_options(0, (), right, floor=x)
+
+    def _status_options(self) -> list[_Option]:
+        """当前可用的 Status 页快捷键；不可用的操作不展示。"""
+
+        spec = _SPECS[self.sel]
+        row_ready = spec.kind != "ai" and not self.runner.has_row(spec.key)
+        options: list[_Option] = []
+        if row_ready:
+            options.extend(
+                (
+                    ("B", ":Build", None),
+                    ("V", ":Deploy", None),
+                )
+            )
+        if any(not self.runner.has_row(key) for key in _DEPLOY_ORDER):
+            options.append(("A", ":Deploy All", None))
+        if row_ready:
+            options.append(("Z", ":Uninstall", None))
+        if not any(self.runner.has_row(key) for key in _UNINSTALL_ORDER):
+            options.append(("X", ":Uninstall All", None))
+        options.append(("L", ":Log", None))
+        if self.runner.busy():
+            options.append(("K", ":Cancel", None))
+        return options
 
     def _draw_page_options(self) -> None:
         y = self.h - 2
         if self.tab == self.CONFIG:
-            self._draw_options(y, (("Enter", ": Edit", None),))
+            self._draw_options(y, (("Enter", ":Edit", None),))
         elif self.tab == self.ENVIRONMENT:
             options: list[_Option] = [
-                ("Left/Right", ": Panel", None),
-                ("Up/Down", ": Item", None),
+                ("Left / Right", ":Switch Panels", None),
+                ("Up / Down", ":Select Items", None),
             ]
             item = self._selected_dependency()
             if item is not None and item.target is not None:
                 pending = self.runner.has_row(item.target.key)
                 if not pending and item.state in {"missing", "failed"}:
-                    options.append(("G", ": Get", None))
-                options.append(("L", ": Log", None))
+                    options.append(("G", ":Get", None))
+                options.append(("L", ":Log", None))
                 if pending:
-                    options.append(("X", ": Cancel", None))
+                    options.append(("X", ":Cancel", None))
             self._draw_options(y, options)
         else:
-            self._draw_options(
-                y,
-                (
-                    ("(re)Build", "", 4),
-                    ("(re)Deploy", "", 4),
-                    ("Uninstall", "", 0),
-                    ("Deploy All", "", 7),
-                    ("Uninstall All", "", 1),
-                    ("Logs", "", 0),
-                    ("X", ": Cancel", None),
-                ),
-            )
+            self._draw_options(y, self._status_options())
 
-    def _draw_status(self) -> None:
+    def _draw_status_bar(self) -> None:
         y = self.h - 1
         a = self.a
         if self.flash_text and time.monotonic() < self.flash_until:
@@ -2874,7 +2907,7 @@ class _Tui:
             parts.append((f"  {queued} queued", a["gray"]))
         self.cell(y, 2, self.w - 4, parts)
 
-    # -- Deploy 页 --------------------------------------------------------
+    # -- Status 页 --------------------------------------------------------
 
     def _geometry(self) -> list[tuple[int, int]]:
         iw = self.w - 4
@@ -2899,14 +2932,14 @@ class _Tui:
         icon = a["gray" if info.state == "ready" else _STATE_COLOR[info.state]]
         return s[info.state], icon, _clean(info.url), attr
 
-    def _draw_deploy(self, top: int, bottom: int) -> None:
+    def _draw_status_page(self, top: int, bottom: int) -> None:
         a = self.a
         rows, _docker, meta, _tools = self.monitor.snapshot()
         view = self.runner.view()
         geo = self._geometry()
 
         self.put(top + 1, 2, "Status", a["yellow"])
-        for (x, _width), title in zip(geo, ("Service Name", "URL", "Docker")):
+        for (x, _width), title in zip(geo, ("Service Name", "URL", "Docker Image")):
             self.put(top + 1, x, title, a["yellow"])
         self.divider(top + 2)
 
@@ -3195,13 +3228,13 @@ class _Tui:
         self._draw_options(
             self.h - 1,
             (
-                ("Arrow-keys", ": Scroll", None),
+                ("Arrow-keys", ":Scroll", None),
                 ("PgUp/PgDn", "", None),
                 ("Home/End", "", None),
-                ("F", ": Follow", None),
-                ("Esc", ": Back", None),
+                ("F", ":Follow", None),
+                ("Esc", ":Back", None),
                 *(
-                    [("X", ": Cancel", None)]
+                    [("X", ":Cancel", None)]
                     if self.runner.has_row(view.target.key)
                     else []
                 ),
@@ -3212,7 +3245,7 @@ class _Tui:
         text = (
             f"Terminal too small ({self.w}x{self.h}); need {_MIN_WIDTH}x{_MIN_HEIGHT}."
         )
-        for index, line in enumerate(_wrap_lines([text, "Q: Quit"], max(10, self.w))):
+        for index, line in enumerate(_wrap_lines([text, "Esc:Quit"], max(10, self.w))):
             self.put(index, 0, line)
 
     def draw(self) -> None:
@@ -3231,10 +3264,14 @@ class _Tui:
                 top, bottom = 1, self.h - 3
                 self._draw_nav()
                 self.box(top, bottom)
-                pages = (self._draw_config, self._draw_environment, self._draw_deploy)
+                pages = (
+                    self._draw_status_page,
+                    self._draw_config,
+                    self._draw_environment,
+                )
                 pages[self.tab](top, bottom)
                 self._draw_page_options()
-                self._draw_status()
+                self._draw_status_bar()
             self._draw_modal()
         self.scr.refresh()
 
@@ -3249,26 +3286,22 @@ class _Tui:
             return
         name = _key_name(key)
         if self.h < _MIN_HEIGHT or self.w < _MIN_WIDTH:
-            if name == "q":
+            if name == "esc":
                 self.request_quit()
             return
         if self.log is not None:
             self._handle_log(key, name)
             return
-        if name == "q":
+        if name == "esc":
             self.request_quit()
-        elif key == 9:
-            self._switch_tab((self.tab + 1) % len(self.TABS))
-        elif key == curses.KEY_BTAB:
-            self._switch_tab((self.tab - 1) % len(self.TABS))
-        elif name in {"c", "e", "p"}:
-            self._switch_tab("cep".index(name))
+        elif name in self.TAB_KEYS:
+            self._switch_tab(self.TAB_KEYS.index(name))
         elif self.tab == self.CONFIG:
             self._handle_config(key, name)
         elif self.tab == self.ENVIRONMENT:
             self._handle_environment(key, name)
         else:
-            self._handle_deploy(key, name)
+            self._handle_status(key, name)
 
     def _switch_tab(self, tab: int) -> None:
         self.tab = tab
@@ -3365,7 +3398,7 @@ class _Tui:
             {"y": start, "n": lambda: None, "esc": lambda: None},
         )
 
-    def _handle_deploy(self, key: int, name: str) -> None:
+    def _handle_status(self, key: int, name: str) -> None:
         last = len(_SPECS) - 1
         if key in {curses.KEY_UP, curses.KEY_DOWN, curses.KEY_HOME, curses.KEY_END}:
             target = {
@@ -3390,17 +3423,17 @@ class _Tui:
                 self.manual_offset = None
         elif name == "b":
             self._act_row("build")
-        elif name == "d":
+        elif name == "v":
             self._act_row("deploy")
-        elif name == "u":
+        elif name == "z":
             self._act_row("uninstall")
         elif name == "a":
             self._deploy_all()
-        elif name == "n":
+        elif name == "x":
             self._uninstall_all()
         elif name == "l":
             self._open_log(_SPECS[self.sel])
-        elif name == "x":
+        elif name == "k":
             self._cancel()
 
     def _handle_log(self, key: int, name: str) -> None:
@@ -3468,7 +3501,7 @@ class _Tui:
 
     def _uninstall_all(self) -> None:
         if any(self.runner.has_row(key) for key in _UNINSTALL_ORDER):
-            self.flash("Some services still have pending tasks. Wait or press X.")
+            self.flash("Some services still have pending tasks. Wait or press K.")
             return
 
         def start(volumes: bool) -> None:
