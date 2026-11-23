@@ -1,13 +1,27 @@
-const serviceUrl = (host, port) => `http://${host}:${port}`;
+// 部署到子路径（例如 nginx 反代 /shopagent/user/）时，由 VITE_API_BASE 指定同源接口前缀，
+// 各服务再把 segment 拼在后面，避免把 127.0.0.1:端口 打进 bundle（远端浏览器连不上）。
+const API_BASE = import.meta.env.VITE_API_BASE || "";
+const serviceUrl = (segment, host, port) =>
+  API_BASE ? `${API_BASE}/${segment}` : `http://${host}:${port}`;
 
 export const CUSTOMER_SERVICE_URL = serviceUrl(
+  "customer",
   import.meta.env.CUSTOMER_SERVICE_HOST || "127.0.0.1",
   import.meta.env.CUSTOMER_SERVICE_PORT || "18000",
 );
 export const ECOMMERCE_SERVICE_URL = serviceUrl(
+  "ecommerce",
   import.meta.env.ECOMMERCE_SERVICE_HOST || "127.0.0.1",
   import.meta.env.ECOMMERCE_SERVICE_PORT || "18001",
 );
+
+// WebSocket 必须是绝对地址：API_BASE 模式下 CUSTOMER_SERVICE_URL 是相对路径，
+// 直接 replace(/^http/, "ws") 会保留相对路径，而 new WebSocket() 只接受绝对 URL。
+const toWebSocketBase = (url) => {
+  if (!url.startsWith("/")) return url.replace(/^http/, "ws");
+  const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${window.location.host}${url}`;
+};
 
 async function parseResponse(response) {
   const body = await response
@@ -126,7 +140,7 @@ export function createRealtimeConnection(token, callbacks = {}) {
   let retryTimer;
   let attempts = 0;
   let hasConnected = false;
-  const websocketUrl = `${CUSTOMER_SERVICE_URL.replace(/^http/, "ws")}/api/v1/realtime`;
+  const websocketUrl = `${toWebSocketBase(CUSTOMER_SERVICE_URL)}/api/v1/realtime`;
 
   const clearTimers = () => {
     window.clearTimeout(retryTimer);
