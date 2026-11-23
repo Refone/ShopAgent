@@ -38,3 +38,8 @@
   `Assisted-by: Cursor (GPT-5.6-terra)`
 
   `Assisted-by: GitHub Copilot (Claude Sonnet 4.5)`
+
+## 关于文档
+
+- 以下文档中的内容与工程无关，避免从中寻找信息。
+  - `docs/notes`: 开发笔记
