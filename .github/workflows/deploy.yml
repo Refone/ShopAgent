@@ -286,7 +286,9 @@ jobs:
             echo "::error::服务器 .env 不存在或为空，拒绝使用模板默认配置部署。"
             exit 1
           fi
-          if grep -Eq '^(JWT_SECRET=ecommerce-secret|POSTGRES_PASSWORD=customer_service)$' .env; then
+          # 与 .env.example 的模板默认值保持一致；命中说明仍在用公开的模板值。
+          if grep -Eqx 'JWT_SECRET=shopagent-dev-jwt-secret-please-change-me' .env \
+            || grep -Eqx 'POSTGRES_PASSWORD=shopagent-dev-postgres-password-please-change-me' .env; then
             echo "::warning::检测到 .env 仍在使用模板默认的 JWT_SECRET 或 POSTGRES_PASSWORD，请尽快更换。"
           fi
 

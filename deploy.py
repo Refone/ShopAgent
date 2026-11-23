@@ -52,6 +52,7 @@ ADMIN_FRONTEND_DIR = FRONTEND_DIR / "admin-frontend"
 
 COMPOSE_FILE = ECOMMERCE_DIR / "compose.yml"
 RUN_DIR = ROOT / "var" / "run"
+TMP_DIR = ROOT / "var" / "tmp"
 DEPLOY_LOG_DIR = ROOT / "var" / "logs" / "deploy"
 
 ALL_COMPONENTS = ("ecommerce", "customer", "ai", "frontend")
@@ -857,6 +858,16 @@ def _ensure_customer_build() -> None:
         build_customer_service()
 
 
+def _pypi_index_url() -> str:
+    """返回安装 Python 依赖使用的 PyPI 镜像地址。
+
+    只由 .env 的 PIP_MIRROR_HOST（域名）决定，默认公网阿里云；
+    腾讯云服务器可改为 mirrors.tencentyun.com（内网，4-7 MB/s）。
+    """
+
+    return f"https://{env('PIP_MIRROR_HOST', 'mirrors.aliyun.com')}/pypi/simple/"
+
+
 def build_customer_service() -> bool:
     """
     构建客户服务
@@ -865,9 +876,48 @@ def build_customer_service() -> bool:
     _prepare()
     _require_command("uv", "请先安装 uv：https://docs.astral.sh/uv/")
     _section("构建 customer-service")
-    _run(["uv", "sync", "--frozen"], cwd=CUSTOMER_DIR)
+
+    python = _customer_venv_python()
+    if python is None:
+        _run(["uv", "venv", "--python", "3.12"], cwd=CUSTOMER_DIR)
+        python = _customer_venv_python()
+        if python is None:
+            raise DeployError("customer-service 虚拟环境创建失败，请检查 uv 输出。")
+
+    # uv.lock 里的下载地址是写死的 files.pythonhosted.org，`uv sync --frozen` 不会改走
+    # 镜像源（国内实测约 15 KB/s，会卡死）。这里先导出只含版本与哈希的锁定清单，
+    # 再按镜像地址安装：版本仍然严格锁定，下载走国内源。
+    requirements = TMP_DIR / "customer-service-requirements.txt"
+    requirements.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        [
+            "uv",
+            "export",
+            "--frozen",
+            "--format",
+            "requirements-txt",
+            "--output-file",
+            str(requirements),
+        ],
+        cwd=CUSTOMER_DIR,
+    )
+    _run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--index-url",
+            _pypi_index_url(),
+            "--requirements",
+            str(requirements),
+        ],
+        cwd=CUSTOMER_DIR,
+    )
+
     if _customer_venv_python() is None or _customer_uvicorn() is None:
-        raise DeployError("customer-service 虚拟环境创建失败，请检查 uv sync 输出。")
+        raise DeployError("customer-service 虚拟环境创建失败，请检查依赖安装输出。")
     _ok("customer-service 依赖安装完成")
     return True
 
