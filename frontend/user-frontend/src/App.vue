@@ -21,6 +21,14 @@ import {
 
 marked.setOptions({ gfm: true, breaks: true });
 
+// 部署在子路径时（vite base 非 "/"，如 /shopagent/user/），页面路由和静态资源都要带 base
+// 前缀：location.pathname 里含前缀，navigate 也要把前缀写回地址栏。
+const baseUrl = import.meta.env.BASE_URL;
+const stripBase = (pathname) =>
+  baseUrl !== "/" && pathname.startsWith(baseUrl)
+    ? `/${pathname.slice(baseUrl.length)}`
+    : pathname;
+
 const mallProductIds = new Set([
   "PRODUCT_001",
   "PRODUCT_002",
@@ -34,7 +42,7 @@ const session = reactive({
 });
 const demoUsers = ref([]);
 const selectedUser = ref(localStorage.getItem("customer_id") || "user_001");
-const route = ref(`${location.pathname}${location.search}`);
+const route = ref(`${stripBase(location.pathname)}${location.search}`);
 const loading = ref(false);
 const error = ref("");
 const notice = ref("");
@@ -115,8 +123,8 @@ const pageTitle = computed(() => {
 
 function navigate(to, { keepNotice = false } = {}) {
   if (!keepNotice) notice.value = "";
-  history.pushState({}, "", to);
-  route.value = `${location.pathname}${location.search}`;
+  history.pushState({}, "", `${baseUrl.replace(/\/$/, "")}${to}`);
+  route.value = `${stripBase(location.pathname)}${location.search}`;
 }
 
 function conversationModeLabel(mode) {
@@ -507,7 +515,7 @@ function logisticsStatus(status) {
 
 onMounted(async () => {
   window.addEventListener("popstate", () => {
-    route.value = `${location.pathname}${location.search}`;
+    route.value = `${stripBase(location.pathname)}${location.search}`;
   });
   demoUsers.value = await listDemoUsers().catch(() => []);
   await establishSession();
@@ -601,7 +609,9 @@ watch(route, loadPage);
                 :aria-label="`${item.name} 商品插画`"
                 viewBox="0 0 320 220"
               >
-                <use :href="`/product-sprite.svg#${productArt(item.id)}`" />
+                <use
+                  :href="`${baseUrl}product-sprite.svg#${productArt(item.id)}`"
+                />
               </svg>
             </div>
             <div class="mall-card-body">
