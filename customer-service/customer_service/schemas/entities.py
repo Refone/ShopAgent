@@ -156,9 +156,7 @@ class ConversationTurn(Base):
         ForeignKey("conversations.id"),
         index=True,
     )
-    status: Mapped[str] = mapped_column(
-        String(30), default=TurnStatus.COLLECTING, index=True
-    )
+    status: Mapped[str] = mapped_column(String(30), default=TurnStatus.OPEN, index=True)
     start_message_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("messages.id"),

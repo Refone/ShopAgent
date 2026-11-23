@@ -63,12 +63,14 @@ class ChatService:
         match conversation.mode:
             case "AI":
                 # AI 模式处理逻辑
-                turn = await self._get_alive_turn(
-                    conversation
-                ) or await self._create_new_turn(
-                    conversation,
-                    new_message,
-                )
+                turn = await self._get_alive_turn(conversation)
+                if turn:
+                    self._append_message_to_turn(turn, new_message)
+                else:
+                    turn = await self._create_new_turn(
+                        conversation,
+                        new_message,
+                    )
                 LOG.info(
                     f"Ensured turn {turn.id} for conversation[{conversation.mode}] {conversation.id}"
                 )
@@ -133,14 +135,14 @@ class ChatService:
         self, conversation: Conversation
     ) -> ConversationTurn | None:
         """
-        获取会话中处于活动状态的轮次，如果没有则返回 None
+        获取会话中处于信息收集状态的轮次，如果没有则返回 None
         """
 
         result = await self._db.execute(
             select(ConversationTurn)
             .where(
                 ConversationTurn.conversation_id == conversation.id,
-                ConversationTurn.status.in_(TurnStatus.ALIVE),
+                ConversationTurn.status == TurnStatus.OPEN,
             )
             .with_for_update(of=ConversationTurn)
         )
@@ -155,12 +157,12 @@ class ChatService:
         first_message: Message,
     ) -> ConversationTurn:
         """
-        创建一个新的会话轮次，并将第一条消息关联到该轮次
+        创建一个新的会话轮次，会话轮次不可能为空，因此要求传入第一条消息
         """
 
         turn = ConversationTurn(
             conversation_id=conversation.id,
-            status=TurnStatus.COLLECTING,
+            status=TurnStatus.OPEN,
             start_message_id=first_message.id,
             end_message_id=first_message.id,
         )
@@ -169,6 +171,17 @@ class ChatService:
         await self._db.flush()  # 因为需要用到 turn 的 id
 
         return turn
+
+    def _append_message_to_turn(
+        self,
+        turn: ConversationTurn,
+        message: Message,
+    ) -> None:
+        """
+        将新消息追加到会话轮次中，更新轮次的结束消息 ID
+        """
+
+        turn.end_message_id = message.id
 
     async def get_history(self, user_id: str) -> dict[str, Any]:
         """

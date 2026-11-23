@@ -75,26 +75,14 @@ class MessageRole(StrEnum):
 
 class TurnStatus(StrEnum):
     """
-    轮次状态枚举。
+    轮次状态枚举
 
     Attributes:
-        COLLECTING: 起始态，正在收集消息。
-        PROCESSING: 中间态，已被 Worker 领取并正在处理。
+        OPEN: 开启状态，正在收集消息。
         COMPLETED: 终态，处理成功。
         FAILED: 终态，处理失败。
-
-        *ALIVE*: 活跃状态集合，(COLLECTING, PROCESSING)。
     """
 
-    COLLECTING = "COLLECTING"
-    PROCESSING = "PROCESSING"
+    OPEN = "OPEN"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
-
-    ALIVE: ClassVar[tuple["TurnStatus", ...]]
-
-
-TurnStatus.ALIVE = (
-    TurnStatus.COLLECTING,
-    TurnStatus.PROCESSING,
-)
