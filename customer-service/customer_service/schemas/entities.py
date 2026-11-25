@@ -126,25 +126,25 @@ class ConversationTurn(Base):
     """
     AI 模式会话中的一个会话轮次, 一问一答、多问一答(插话追问)、一问多答。
 
-    同一会话最多只能有一个活动态 (COLLECTING | PROCESSING) 的轮次，
+    同一会话最多只能有一个 OPEN 状态的轮次，
 
     Attributes:
         id: 系统内部使用的 64 位自增主键。
         uuid: 轮次唯一标识，由服务端生成，供外部系统使用。
         conversation_id: 所属会话的外键，关联 conversations.id。
-        status: 轮次状态，取值见 TurnStatus, 初始为 COLLECTING。
+        status: 轮次状态，取值见 TurnStatus, 初始为 OPEN。
         start_message_id: 轮次第一条消息 ID, 关联 messages.id。
         end_message_id: 轮次最后一条消息 ID, 关联 messages.id。
     """
 
     __tablename__ = "conversation_turns"
     __table_args__ = (
-        # 同一个 conversation_id 只能有一个 COLLECTING ｜ PROCESSING 状态的轮次，其他状态不受此约束
+        # 同一个 conversation_id 只能有一个 OPEN 状态的轮次，其他状态不受此约束
         Index(
             "uq_alive_turn_per_conversation",
             "conversation_id",
             unique=True,
-            postgresql_where=text("status IN ('COLLECTING', 'PROCESSING')"),
+            postgresql_where=text("status = 'OPEN'"),
         ),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
