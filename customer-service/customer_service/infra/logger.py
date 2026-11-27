@@ -5,7 +5,7 @@ import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from common.settings import get_settings
+from customer_service.common.settings import get_settings
 
 # ANSI 颜色定义
 COLORS = {

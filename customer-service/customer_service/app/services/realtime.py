@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from schemas.entities import Conversation, Message, RealtimeEvent
+from customer_service.schemas.entities import Conversation, Message, RealtimeEvent
 
 
 class RealtimeService:

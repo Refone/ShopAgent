@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from common.settings import get_settings
+from customer_service.common.settings import get_settings
 
 POSTGRESQL_ENGINE: AsyncEngine = create_async_engine(
     get_settings().postgres_url,

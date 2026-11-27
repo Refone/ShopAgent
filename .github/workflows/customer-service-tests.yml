@@ -61,13 +61,13 @@ jobs:
         run: uv sync --frozen
 
       - name: Create database tables
-        run: .venv/bin/python -m scripts.init_db -y
+        run: .venv/bin/python -m customer_service.scripts.init_db -y
 
       - name: Run tests
         run: |
           set -euo pipefail
 
-          .venv/bin/uvicorn app.app:app \
+          .venv/bin/uvicorn customer_service.app.app:app \
             --host "$CUSTOMER_SERVICE_HOST" --port "$CUSTOMER_SERVICE_PORT" \
             > /tmp/customer-service.log 2>&1 &
           server_pid=$!

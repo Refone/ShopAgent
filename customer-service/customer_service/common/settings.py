@@ -6,7 +6,7 @@ from urllib.parse import quote
 from pydantic import BeforeValidator, Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ENV_FILE = PROJECT_ROOT / ".env"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "var" / "logs" / "customer-service"
 

@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from schemas.enums import MessageType
+from customer_service.schemas.enums import MessageType
 
 
 class ChatMessageRequest(BaseModel):

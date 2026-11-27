@@ -2,9 +2,9 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 
-from app.dependencies import ChatServiceDep
-from infra.auth import CurrentUser, require_roles
-from schemas.api import ChatMessageRequest
+from customer_service.app.dependencies import ChatServiceDep
+from customer_service.infra.auth import CurrentUser, require_roles
+from customer_service.schemas.api import ChatMessageRequest
 
 chat_router = APIRouter(
     prefix="/api/v1/chat",
