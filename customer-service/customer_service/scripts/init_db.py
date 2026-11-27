@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 
+from sqlalchemy import text
+
 from customer_service.infra.pgsql import POSTGRESQL_ENGINE
 from customer_service.schemas.entities import Base
 
@@ -8,7 +10,9 @@ from customer_service.schemas.entities import Base
 async def reset_database() -> None:
     async with POSTGRESQL_ENGINE.begin() as conn:
         print("正在清空数据库...")
-        await conn.run_sync(Base.metadata.drop_all)
+        # 直接重建 public schema，避免旧表遗留的外键依赖导致 drop_all 删除顺序出错
+        await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        await conn.execute(text("CREATE SCHEMA public"))
         print("正在创建数据库表...")
         await conn.run_sync(Base.metadata.create_all)
 

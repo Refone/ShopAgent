@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -90,6 +90,9 @@ class Conversation(Base):
         """
         self.mode = ConversationMode.CLOSED
 
+    def __repr__(self):
+        return f"<Conversation id={self.id} uuid={self.uuid} user_id={self.user_id} mode={self.mode}>"
+
 
 class Message(Base):
     """
@@ -101,6 +104,7 @@ class Message(Base):
         id: 系统内部使用的 64 位自增主键。
         uuid: 业务消息唯一标识，用户消息由前端生成，用于重复提交检查。
         conversation_id: 所属会话的外键，关联 conversations.id。
+        turn_id: 所属会话轮次的外键，关联 conversation_turns.id。
         role: 消息发送方角色，使用 USER、AI 或 HUMAN。
         message_type: 消息类型，支持 text 和 object，默认为 text。
         content: 消息内容，以 JSONB 保存文本或消息卡片等结构化数据。
@@ -112,7 +116,15 @@ class Message(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     uuid: Mapped[str] = mapped_column(String(80), unique=True)
     conversation_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("conversations.id"), index=True
+        BigInteger,
+        ForeignKey("conversations.id"),
+        index=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("conversation_turns.id"),
+        nullable=True,
+        index=True,
     )
     role: Mapped[str] = mapped_column(String(20))
     message_type: Mapped[str] = mapped_column(String(20), default=MessageType.TEXT)
@@ -121,30 +133,38 @@ class Message(Base):
         DateTime(timezone=True), default=get_utcnow
     )
 
+    def __repr__(self):
+        return f"<Message id={self.id} uuid={self.uuid} conversation_id={self.conversation_id} turn_id={self.turn_id} role={self.role} message_type={self.message_type} content={self.content}>"
+
 
 class ConversationTurn(Base):
     """
     AI 模式会话中的一个会话轮次, 一问一答、多问一答(插话追问)、一问多答。
 
-    同一会话最多只能有一个 OPEN 状态的轮次，
+    同一会话最多只能有一个运行状态状态的轮次，
 
     Attributes:
         id: 系统内部使用的 64 位自增主键。
         uuid: 轮次唯一标识，由服务端生成，供外部系统使用。
         conversation_id: 所属会话的外键，关联 conversations.id。
-        status: 轮次状态，取值见 TurnStatus, 初始为 OPEN。
-        start_message_id: 轮次第一条消息 ID, 关联 messages.id。
-        end_message_id: 轮次最后一条消息 ID, 关联 messages.id。
+        status: 轮次状态，取值见 TurnStatus, 初始为 COLLECTING。
+        revision: 轮次的修订号，每次更新轮次状态或内容时递增。
     """
 
     __tablename__ = "conversation_turns"
     __table_args__ = (
-        # 同一个 conversation_id 只能有一个 OPEN 状态的轮次，其他状态不受此约束
+        # 同一个 conversation_id 只能有一个运行状态 (COLLECTING 或 RUNNING) 的轮次，其他状态不受此约束
         Index(
-            "uq_alive_turn_per_conversation",
+            "uq_collecting_turn_per_conversation",
             "conversation_id",
             unique=True,
-            postgresql_where=text("status = 'OPEN'"),
+            postgresql_where=text(f"status = '{TurnStatus.COLLECTING}'"),
+        ),
+        Index(
+            "uq_executing_turn_per_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text(f"status = '{TurnStatus.RUNNING}'"),
         ),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -156,15 +176,13 @@ class ConversationTurn(Base):
         ForeignKey("conversations.id"),
         index=True,
     )
-    status: Mapped[str] = mapped_column(String(30), default=TurnStatus.OPEN, index=True)
-    start_message_id: Mapped[int] = mapped_column(
-        BigInteger,
-        ForeignKey("messages.id"),
+    status: Mapped[str] = mapped_column(
+        String(30), default=TurnStatus.COLLECTING, index=True
     )
-    end_message_id: Mapped[int] = mapped_column(
-        BigInteger,
-        ForeignKey("messages.id"),
-    )
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+
+    def __repr__(self):
+        return f"<ConversationTurn id={self.id} uuid={self.uuid} conversation_id={self.conversation_id} status={self.status} revision={self.revision}>"
 
 
 class RealtimeEvent(Base):

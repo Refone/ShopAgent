@@ -62,10 +62,17 @@ class TurnWorker:
         领取一个会话轮次
         """
 
-        # 查询数据库中处于 OPEN 状态的会话轮次，按创建顺序先到先处理
+        # 查询数据库中处于运行状态的会话轮次，按创建顺序先到先处理
         result = await session.execute(
             select(ConversationTurn)
-            .where(ConversationTurn.status == TurnStatus.OPEN)
+            .where(
+                ConversationTurn.status.in_(
+                    [
+                        TurnStatus.COLLECTING,
+                        TurnStatus.RUNNING,
+                    ]
+                )
+            )
             .order_by(ConversationTurn.id)
             .limit(1)
             .with_for_update(of=ConversationTurn)
@@ -164,7 +171,7 @@ class TurnWorker:
             await session.commit()
             return
 
-        if now_turn.status != TurnStatus.OPEN:
+        if now_turn.status != TurnStatus.COLLECTING:
             LOG.warning(
                 f"Turn {turn.id} status changed to {now_turn.status}, discard AI result"
             )

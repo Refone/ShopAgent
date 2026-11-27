@@ -33,10 +33,10 @@ class ChatService:
         LOG.info(f"Accepting message from user_id={user_id} with payload={payload}")
 
         # 重复提交防御
-        result = await self._db.execute(
+        db_result = await self._db.execute(
             select(Message).where(Message.uuid == payload.message_id)
         )
-        existing_message = result.scalar_one_or_none()
+        existing_message = db_result.scalar_one_or_none()
         if existing_message:
             LOG.warning(f"Message already exists: {existing_message.uuid}")
             return payload
@@ -61,20 +61,19 @@ class ChatService:
 
         # 根据会话模式分流处理
         match conversation.mode:
-            case "AI":
+            case ConversationMode.AI:
                 # AI 模式处理逻辑
-                turn = await self._get_alive_turn(conversation)
-                if turn:
-                    self._append_message_to_turn(turn, new_message)
-                else:
-                    turn = await self._create_new_turn(
-                        conversation,
-                        new_message,
-                    )
-                LOG.info(
-                    f"Ensured turn {turn.id} for conversation[{conversation.mode}] {conversation.id}"
-                )
-            case "QUEUED" | "HUMAN":
+
+                turn = await self._ensure_turn(conversation)
+                # 尝试获取一个会话轮次:
+                #     1. 不存在活动状态的会话轮次 --> 创建一个新的会话轮次
+                #     2. 存在一个 RUNNING 状态的会话轮次 --> AI 还没回复，用户插话
+                #     3. 存在一个 COLLECTING 状态的会话轮次 --> 处于防抖窗口
+                LOG.debug(f"Ensured turn {turn}")
+
+                self._append_message_to_turn(turn, new_message)
+
+            case ConversationMode.QUEUED | ConversationMode.HUMAN:
                 # 人工模式处理逻辑
                 pass
             case _:
@@ -92,16 +91,22 @@ class ChatService:
         确保会话存在，如果不存在则创建
         """
 
-        result = await self._db.execute(
+        db_result = await self._db.execute(
             select(Conversation)
             .where(
                 Conversation.user_id == user_id,
-                Conversation.mode.in_(ConversationMode.ALIVE),
+                Conversation.mode.in_(
+                    [
+                        ConversationMode.AI,
+                        ConversationMode.QUEUED,
+                        ConversationMode.HUMAN,
+                    ]
+                ),
             )
             .with_for_update(of=Conversation)  # 锁定会话行，防止并发创建重复会话
         )
 
-        conversation = result.scalar_one_or_none()
+        conversation = db_result.scalar_one_or_none()
 
         if conversation:
             # 当前用户存在未关闭的会话
@@ -131,30 +136,34 @@ class ChatService:
 
         return conversation
 
-    async def _get_alive_turn(
-        self, conversation: Conversation
-    ) -> ConversationTurn | None:
+    async def _ensure_turn(self, conversation: Conversation) -> ConversationTurn | None:
         """
-        获取会话中处于信息收集状态的轮次，如果没有则返回 None
+        尝试获取一个会话轮次
+        寻找一个处于 COLLECTING 或 OPENING 的会话轮次
+        如果没有，创建一个新的会话轮次
         """
 
-        result = await self._db.execute(
+        db_result = await self._db.execute(
             select(ConversationTurn)
             .where(
                 ConversationTurn.conversation_id == conversation.id,
-                ConversationTurn.status == TurnStatus.OPEN,
+                ConversationTurn.status.in_(
+                    [
+                        TurnStatus.COLLECTING,
+                        TurnStatus.RUNNING,
+                    ]
+                ),
             )
             .with_for_update(of=ConversationTurn)
         )
 
-        turn = result.scalar_one_or_none()
+        turn = db_result.scalar_one_or_none()
 
-        return turn
+        return turn or await self._create_new_turn(conversation)
 
     async def _create_new_turn(
         self,
         conversation: Conversation,
-        first_message: Message,
     ) -> ConversationTurn:
         """
         创建一个新的会话轮次，会话轮次不可能为空，因此要求传入第一条消息
@@ -162,9 +171,8 @@ class ChatService:
 
         turn = ConversationTurn(
             conversation_id=conversation.id,
-            status=TurnStatus.OPEN,
-            start_message_id=first_message.id,
-            end_message_id=first_message.id,
+            status=TurnStatus.COLLECTING,
+            revision=0,
         )
 
         self._db.add(turn)
@@ -178,10 +186,16 @@ class ChatService:
         message: Message,
     ) -> None:
         """
-        将新消息追加到会话轮次中，更新轮次的结束消息 ID
-        """
+        分两种情况:
+        1. 会话轮次处于 COLLECTING 状态，表示开启了新的轮次，直接将消息追加到当前轮次
+        2. 会话轮次处于 RUNNING 状态，表示 AI 正在回复，用户插话，创建新的轮次并将消息追加到新轮次
 
-        turn.end_message_id = message.id
+        但是在追加逻辑中不予判断
+        仅更新 revision
+        当 AI 处理结果返回时，在 TurnWorker 中再根据情况具体处理
+        """
+        turn.revision += 1
+        message.turn_id = turn.id
 
     async def get_history(self, user_id: str) -> dict[str, Any]:
         """
@@ -191,7 +205,7 @@ class ChatService:
         LOG.info(f"Get History from user_id={user_id}")
 
         # 查询用户的所有消息
-        result = await self._db.execute(
+        db_result = await self._db.execute(
             select(
                 Message.uuid,
                 Conversation.uuid.label("conversation_id"),  # 对外 uuid
@@ -203,7 +217,7 @@ class ChatService:
             .where(Conversation.user_id == user_id)
         )
 
-        all_messages = [dict(row) for row in result.mappings().all()]
+        all_messages = [dict(row) for row in db_result.mappings().all()]
 
         conversation = await self._ensure_conversation(user_id)
 

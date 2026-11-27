@@ -1,5 +1,4 @@
 from enum import StrEnum
-from typing import ClassVar
 
 
 class UserRole(StrEnum):
@@ -48,8 +47,6 @@ class ConversationMode(StrEnum):
     HUMAN = "HUMAN"
     CLOSED = "CLOSED"
 
-    ALIVE: ClassVar[tuple["ConversationMode", ...]]
-
 
 ConversationMode.ALIVE = (
     ConversationMode.AI,
@@ -78,11 +75,13 @@ class TurnStatus(StrEnum):
     轮次状态枚举
 
     Attributes:
-        OPEN: 开启状态，正在收集消息。
+        COLLECTING: 开启状态，正在收集消息。
+        RUNNING: 处理中状态，正在处理消息。
         COMPLETED: 终态，处理成功。
         FAILED: 终态，处理失败。
     """
 
-    OPEN = "OPEN"
+    COLLECTING = "COLLECTING"
+    RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"

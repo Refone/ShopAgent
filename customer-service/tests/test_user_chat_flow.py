@@ -120,6 +120,6 @@ def test_user_frontend_chat_flow(
         assert len(turns) == 1, turns
         turn = turns[0]
         assert turn["conversation_id"] == conversation["id"]
-        assert turn["status"] == "OPEN"
+        assert turn["status"] == "COLLECTING"
         assert turn["start_message_id"] == message["id"]
         assert turn["end_message_id"] == message["id"]
