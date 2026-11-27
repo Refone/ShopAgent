@@ -2,11 +2,10 @@ import asyncio
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from customer_service.common.settings import get_settings
 from customer_service.infra.logger import LOG
-from customer_service.infra.pgsql import postgresql_session_factory
+from customer_service.infra.pgsql import AsyncSession, postgresql_session_factory
 from customer_service.schemas.entities import ConversationTurn, Message
 from customer_service.schemas.enums import TurnStatus
 
@@ -30,40 +29,45 @@ class TurnWorker:
         """
 
         while True:
-            turn: ConversationTurn | None = None
-            payload: dict[str, Any] | None = None
-
             async with self._session_factory() as session:
+                turn: ConversationTurn | None = None
+                payload: dict[str, Any] | None = None
+
+                # 尝试领取一个运行状态的会话轮次
                 turn = await self._claim_turn(session)
-                if turn is not None:
-                    LOG.info(f"Claimed turn: {turn.id}")
 
-                    payload = await self._build_ai_request_payload(session, turn)
-                    LOG.info(f"Sending turn to AI service: {payload}")
+                if turn is None:
+                    await asyncio.sleep(self._interval_ms / 1000)
+                    continue
 
-                    # 释放 Turn 的行锁，在等待 AI Service 处理时不阻塞其他事务
-                    await session.commit()
+                LOG.info(f"Claimed turn: {turn}")
 
-            if turn is None:
-                await asyncio.sleep(self._interval_ms / 1000)
-                continue
+                # 构建 AI Service 需要的 payload
+                payload = await self._build_ai_request_payload(session, turn)
+                LOG.info(f"Sending turn to AI service: {payload}")
 
-            assert payload is not None
-            # 由 worker 去请求 AI service，通过 ai 判断如何处理用户询问
-            ai_result = await self._send_to_ai_service(payload)
-            LOG.info(f"AI service returned result: {ai_result}")
+                # 更新 turn 的状态 COLLECTIONG -> RUNNING, 避免被其他 worker 重复领取
+                turn.status = TurnStatus.RUNNING
 
-            # 处理 AI Service 的响应结果, 传入 turn 是需要判断有无插话
-            async with self._session_factory() as session:
+                # 释放 Turn 的行锁，在等待 AI Service 处理时不阻塞其他事务,
+                # 如果出现插话等情况，由 handle_ai_service 处理
+                await session.commit()
+
+                # 由 worker 去请求 AI service，通过 ai 判断如何处理用户询问
+                ai_result = await self._send_to_ai_service(session, payload)
+                LOG.info(f"AI service returned result: {ai_result}")
+
+                # 处理 AI Service 的响应结果, 传入 turn 是需要判断有无插话
                 await self._handle_ai_result(session, turn, ai_result)
 
     async def _claim_turn(self, session: AsyncSession) -> ConversationTurn | None:
         """
         领取一个会话轮次
+        会话可以是 COLLECTING 或 RUNNING 状态的轮次
         """
 
         # 查询数据库中处于运行状态的会话轮次，按创建顺序先到先处理
-        result = await session.execute(
+        db_result = await session.execute(
             select(ConversationTurn)
             .where(
                 ConversationTurn.status.in_(
@@ -73,12 +77,10 @@ class TurnWorker:
                     ]
                 )
             )
-            .order_by(ConversationTurn.id)
-            .limit(1)
             .with_for_update(of=ConversationTurn)
         )
 
-        return result.scalar_one_or_none()
+        return db_result.scalar_one_or_none()
 
     async def _build_ai_request_payload(
         self, session: AsyncSession, turn: ConversationTurn
@@ -92,20 +94,24 @@ class TurnWorker:
         result = await session.execute(
             select(Message)
             .where(
-                Message.conversation_id == conversation_id,
-                Message.id >= turn.start_message_id,
-                Message.id <= turn.end_message_id,
+                Message.turn_id == turn.id,
             )
             .order_by(Message.id)
         )
         current_turn_messages = result.scalars().all()
+
+        # 理论不该有这种情况，轮次创建流程中，Message.turn_id 被正确设置后才会入库
+        if not current_turn_messages or len(current_turn_messages) == 0:
+            raise ValueError(f"Turn {turn.id} has no messages")
+
+        first_message_id = current_turn_messages[0].id
 
         # 先按倒序取最近 N 条，再翻转回时间正序，供 AI 理解上下文
         result = await session.execute(
             select(Message)
             .where(
                 Message.conversation_id == conversation_id,
-                Message.id < turn.start_message_id,
+                Message.id < first_message_id,
             )
             .order_by(Message.id.desc())
             .limit(self.HISTORY_TRACE_LIMIT)
@@ -114,28 +120,34 @@ class TurnWorker:
 
         return {
             "conversation_id": conversation_id,
+            "turn_id": turn.id,
+            "turn_revision": turn.revision,
             "messages": [
                 {
                     "role": message.role,
-                    "content": message.content,
                     "type": message.message_type,
+                    "content": message.content,
                 }
                 for message in current_turn_messages
             ],
             "history": [
                 {
                     "role": history.role,
-                    "content": history.content,
                     "type": history.message_type,
+                    "content": history.content,
                 }
                 for history in history_messages
             ],
         }
 
-    async def _send_to_ai_service(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _send_to_ai_service(
+        self, session: AsyncSession, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         """
         将领取到的 turn 交给 AI Service 处理，并返回 AI Service 的响应结果
         """
+        LOG.info(f"Send AI Service request with payload: {payload}")
+
         return {}  # 这里应返回 AI Service 的响应结果，暂时返回空字典作为占位
 
     async def _handle_ai_result(
