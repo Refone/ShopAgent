@@ -5,9 +5,9 @@ from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String,
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from customer_service.common.settings import get_settings
-from customer_service.common.utils import get_uid, get_utcnow
-from customer_service.schemas.enums import (
+from common.settings import get_settings
+from common.utils import get_uid, get_utcnow
+from schemas.enums import (
     ConversationMode,
     MessageType,
     TurnStatus,

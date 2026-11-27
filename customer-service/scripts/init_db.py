@@ -3,8 +3,8 @@ import asyncio
 
 from sqlalchemy import text
 
-from customer_service.infra.pgsql import POSTGRESQL_ENGINE
-from customer_service.schemas.entities import Base
+from infra.pgsql import POSTGRESQL_ENGINE
+from schemas.entities import Base
 
 
 async def reset_database() -> None:

@@ -16,6 +16,7 @@
     "files.trimFinalNewlines": true,
 
     "files.exclude": {
+      "**/.pytest_cache": true,
       "**/__pycache__": true,
       "**/.venv": true,
       "**/.ruff_cache": true,

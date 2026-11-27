@@ -10,11 +10,11 @@ cd customer-service
 
 ```shell
 source .venv/bin/activate
-uvicorn customer_service.app.app:app --host 0.0.0.0 --port <port> --reload
+uvicorn app.app:app --host 0.0.0.0 --port <port> --reload
 ```
 
 main 启动
 
 ```shell
-.venv/bin/python customer_service/main.py
+.venv/bin/python main.py
 ```

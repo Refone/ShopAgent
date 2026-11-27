@@ -3,12 +3,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from customer_service.app.services.realtime import RealtimeService
-from customer_service.common.settings import get_settings
-from customer_service.infra.logger import LOG
-from customer_service.schemas.api import ChatMessageRequest
-from customer_service.schemas.entities import Conversation, ConversationTurn, Message
-from customer_service.schemas.enums import ConversationMode, MessageRole, TurnStatus
+from app.services.realtime import RealtimeService
+from common.settings import get_settings
+from infra.logger import LOG
+from schemas.api import ChatMessageRequest
+from schemas.entities import Conversation, ConversationTurn, Message
+from schemas.enums import ConversationMode, MessageRole, TurnStatus
 
 
 class ChatService:

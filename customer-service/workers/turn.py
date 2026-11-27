@@ -3,11 +3,11 @@ from typing import Any
 
 from sqlalchemy import select
 
-from customer_service.common.settings import get_settings
-from customer_service.infra.logger import LOG
-from customer_service.infra.pgsql import AsyncSession, postgresql_session_factory
-from customer_service.schemas.entities import ConversationTurn, Message
-from customer_service.schemas.enums import TurnStatus
+from common.settings import get_settings
+from infra.logger import LOG
+from infra.pgsql import AsyncSession, postgresql_session_factory
+from schemas.entities import ConversationTurn, Message
+from schemas.enums import TurnStatus
 
 
 class TurnWorker:

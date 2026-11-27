@@ -98,8 +98,8 @@ REQUIRED_ENV = (
 CREATE_CUSTOMER_TABLES_CODE = """
 import asyncio
 
-from customer_service.infra.pgsql import POSTGRESQL_ENGINE
-from customer_service.schemas.entities import Base
+from infra.pgsql import POSTGRESQL_ENGINE
+from schemas.entities import Base
 
 
 async def main() -> None:
@@ -688,7 +688,7 @@ def _process_home(name: str) -> tuple[Path, str, int, tuple[str, ...]] | None:
     if name == "customer-service":
         host = env("CUSTOMER_SERVICE_HOST", "127.0.0.1")
         port = env_int("CUSTOMER_SERVICE_PORT", 18000)
-        return CUSTOMER_DIR, host, port, ("customer_service.app.app",)
+        return CUSTOMER_DIR, host, port, ("app.app:app",)
     for frontend in _FRONTENDS:
         if frontend.name == name:
             host, port = _frontend_host(frontend), _frontend_port(frontend)
@@ -1083,11 +1083,9 @@ def reset_all_databases(assume_yes: bool = False) -> bool:
         return False
 
     ecommerce_was_running = _compose_service_running("app")
-    customer_was_running = (
-        _tracked_pid("customer-service", "customer_service.app.app") is not None
-    )
+    customer_was_running = _tracked_pid("customer-service", "app.app:app") is not None
     if customer_was_running:
-        _stop_process("customer-service", "customer_service.app.app")
+        _stop_process("customer-service", "app.app:app")
 
     _info("删除数据卷并重建基础设施 ...")
     _compose("down", "-v", "--remove-orphans")
@@ -1114,7 +1112,7 @@ def reset_all_databases(assume_yes: bool = False) -> bool:
         [
             _customer_venv_python(),
             "-m",
-            "customer_service.scripts.init_db",
+            "scripts.init_db",
             "-y",
         ],
         cwd=CUSTOMER_DIR,
@@ -1210,14 +1208,14 @@ def deploy_customer_service() -> bool:
         raise DeployError("customer-service 虚拟环境中找不到 uvicorn。")
 
     _section("部署 customer-service")
-    _stop_process("customer-service", "customer_service.app.app")
+    _stop_process("customer-service", "app.app:app")
     _ensure_port_free("customer-service", host, port)
 
     process, log_path = _start_background(
         "customer-service",
         [
             uvicorn,
-            "customer_service.app.app:app",
+            "app.app:app",
             "--host",
             host,
             "--port",
@@ -1234,7 +1232,7 @@ def deploy_customer_service() -> bool:
             log_path=log_path,
         )
     except DeployError:
-        _stop_process("customer-service", "customer_service.app.app")
+        _stop_process("customer-service", "app.app:app")
         raise
 
     _ok(f"customer-service：{_display_url(host, port)}")
@@ -1346,7 +1344,7 @@ def undeploy_all_services(remove_volumes: bool = False) -> bool:
     _prepare()
     _section("停止并卸载全部服务")
 
-    _stop_process("customer-service", "customer_service.app.app")
+    _stop_process("customer-service", "app.app:app")
     for frontend in _FRONTENDS:
         _stop_process(frontend.name, "vite")
 
@@ -1450,7 +1448,7 @@ def check_status() -> bool:
     customer_host = env("CUSTOMER_SERVICE_HOST", "127.0.0.1")
     customer_port = env_int("CUSTOMER_SERVICE_PORT", 18000)
     customer_url = _display_url(customer_host, customer_port)
-    customer_pid = _tracked_pid("customer-service", "customer_service.app.app")
+    customer_pid = _tracked_pid("customer-service", "app.app:app")
     customer_up = _http_ok(_http_url(customer_host, customer_port, "/openapi.json"))
     if customer_up:
         customer_detail = customer_url
@@ -1851,7 +1849,7 @@ def _row_process(spec: _Spec) -> tuple[str, str] | None:
     """返回由本检出以后台进程方式管理的行对应的 PID 名称与命令标识。"""
 
     if spec.kind == "customer":
-        return "customer-service", "customer_service.app.app"
+        return "customer-service", "app.app:app"
     if spec.frontend is not None:
         return spec.frontend.name, "vite"
     return None

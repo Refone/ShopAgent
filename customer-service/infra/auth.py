@@ -5,8 +5,8 @@ import jwt
 from fastapi import Header, HTTPException, status
 from pydantic import BaseModel, Field
 
-from customer_service.common.settings import get_settings
-from customer_service.schemas.enums import UserRole
+from common.settings import get_settings
+from schemas.enums import UserRole
 
 
 class CurrentUser(BaseModel):
