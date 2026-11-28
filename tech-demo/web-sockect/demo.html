@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebSocket Mini Demo</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #f2f4f8;
+        font-family:
+          system-ui,
+          -apple-system,
+          "PingFang SC",
+          "Microsoft YaHei",
+          sans-serif;
+      }
+
+      .card {
+        width: min(520px, calc(100vw - 48px));
+        padding: 32px;
+        border-radius: 16px;
+        background: #ffffff;
+        box-shadow: 0 8px 24px rgb(0 0 0 / 8%);
+      }
+
+      h1 {
+        margin: 0 0 24px;
+        font-size: 20px;
+        text-align: center;
+      }
+
+      .formula {
+        display: flex;
+        align-items: flex-end;
+        gap: 12px;
+      }
+
+      .field {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      label {
+        font-size: 13px;
+        color: #666666;
+      }
+
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #d5dae3;
+        border-radius: 8px;
+        font-size: 18px;
+        text-align: center;
+      }
+
+      input:focus {
+        outline: 2px solid #4a7cf7;
+        outline-offset: -1px;
+      }
+
+      .op {
+        font-size: 20px;
+        padding-bottom: 12px;
+        color: #444444;
+      }
+
+      #result {
+        box-sizing: border-box;
+        padding: 10px 12px;
+        border: 1px solid transparent;
+        font-size: 18px;
+        font-weight: 600;
+        text-align: center;
+      }
+
+      #status {
+        margin: 16px 0 0;
+        font-size: 13px;
+        text-align: center;
+        color: #2e7d32;
+      }
+
+      #status.error {
+        color: #c62828;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>WebSocket Mini Demo</h1>
+      <div class="formula">
+        <div class="field">
+          <input
+            id="num1"
+            type="number"
+            step="1"
+            inputmode="numeric"
+            value="1"
+            autocomplete="off"
+          />
+        </div>
+        <span class="op">+</span>
+        <div class="field">
+          <input
+            id="num2"
+            type="number"
+            step="1"
+            inputmode="numeric"
+            value="2"
+            autocomplete="off"
+          />
+        </div>
+        <span class="op">=</span>
+        <div class="field">
+          <output id="result"></output>
+        </div>
+      </div>
+      <p id="status">正在连接服务器…</p>
+    </main>
+    <script>
+      "use strict";
+
+      const num1 = document.getElementById("num1");
+      const num2 = document.getElementById("num2");
+      const result = document.getElementById("result");
+      const status = document.getElementById("status");
+
+      function setStatus(text, ok = true) {
+        status.textContent = text;
+        status.className = ok ? "" : "error";
+      }
+
+      // 页面由后端托管，直接复用当前主机与端口建立 WebSocket 连接
+      const ws = new WebSocket(`ws://${location.host}/ws`);
+
+      ws.onopen = () => {
+        setStatus("已连接");
+        // 连接建立后立即计算一次，初始化结果显示框1 + 框2 的和
+        send();
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.error) {
+          result.textContent = "";
+          setStatus(data.error, false);
+          return;
+        }
+        result.textContent = data.sum;
+        setStatus("已连接");
+      };
+
+      ws.onclose = () => setStatus("连接已断开，请刷新页面重试", false);
+      ws.onerror = () => setStatus("连接失败，请确认后端已启动", false);
+
+      function send() {
+        if (ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        // 两个输入框都是合法整数时才发送
+        if (
+          !Number.isInteger(num1.valueAsNumber) ||
+          !Number.isInteger(num2.valueAsNumber)
+        ) {
+          result.textContent = "";
+          return;
+        }
+        ws.send(
+          JSON.stringify({ a: num1.valueAsNumber, b: num2.valueAsNumber }),
+        );
+      }
+
+      num1.addEventListener("input", send);
+      num2.addEventListener("input", send);
+    </script>
+  </body>
+</html>
