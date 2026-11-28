@@ -9,6 +9,9 @@
     {
       "path": "customer-service",
     },
+    {
+      "path": "ai-service",
+    },
   ],
   "settings": {
     "files.eol": "\n",
@@ -32,11 +35,12 @@
     "python.analysis.extraPaths": [
       "${workspaceFolder:ecommerce-service}",
       "${workspaceFolder:customer-service}",
+      "${workspaceFolder:ai-service}",
     ],
     "python.analysis.autoImportCompletions": true,
 
     "terminal.integrated.env.osx": {
-      "PYTHONPATH": "${workspaceFolder:ecommerce-service}:${workspaceFolder:customer-service}",
+      "PYTHONPATH": "${workspaceFolder:ecommerce-service}:${workspaceFolder:customer-service}:${workspaceFolder:ai-service}",
     },
 
     "[python]": {

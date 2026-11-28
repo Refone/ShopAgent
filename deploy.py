@@ -689,6 +689,10 @@ def _process_home(name: str) -> tuple[Path, str, int, tuple[str, ...]] | None:
         host = env("CUSTOMER_SERVICE_HOST", "127.0.0.1")
         port = env_int("CUSTOMER_SERVICE_PORT", 18000)
         return CUSTOMER_DIR, host, port, ("customer_service.app.app",)
+    if name == "ai-service":
+        host = env("AI_SERVICE_HOST", "127.0.0.1")
+        port = env_int("AI_SERVICE_PORT", 18002)
+        return AI_DIR, host, port, ("ai_service.app.app",)
     for frontend in _FRONTENDS:
         if frontend.name == name:
             host, port = _frontend_host(frontend), _frontend_port(frontend)
@@ -922,6 +926,27 @@ def build_customer_service() -> bool:
     return True
 
 
+def _ai_venv_python() -> Path | None:
+    candidates = (
+        AI_DIR / ".venv" / "bin" / "python",
+        AI_DIR / ".venv" / "Scripts" / "python.exe",
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
+def _ai_uvicorn() -> Path | None:
+    candidates = (
+        AI_DIR / ".venv" / "bin" / "uvicorn",
+        AI_DIR / ".venv" / "Scripts" / "uvicorn.exe",
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
+def _ensure_ai_build() -> None:
+    if _ai_venv_python() is None or _ai_uvicorn() is None:
+        build_ai_service()
+
+
 def _ai_service_has_code() -> bool:
     if not AI_DIR.exists():
         return False
@@ -936,11 +961,54 @@ def build_ai_service() -> bool:
 
     _prepare()
     if not _ai_service_has_code():
-        _warn("ai-service 目录为空（尚未实现），跳过构建")
+        _warn("ai-service 目录为空，跳过构建")
         return False
-    raise DeployError(
-        "ai-service 目录中出现文件，但 deploy.py 尚未实现其构建逻辑，请先补充脚本。"
+
+    _require_command("uv", "请先安装 uv：https://docs.astral.sh/uv/")
+    _section("构建 ai-service")
+
+    python = _ai_venv_python()
+    if python is None:
+        _run(["uv", "venv", "--python", "3.12"], cwd=AI_DIR)
+        python = _ai_venv_python()
+        if python is None:
+            raise DeployError("ai-service 虚拟环境创建失败，请检查 uv 输出。")
+
+    # 与 customer-service 相同：uv.lock 里的下载地址写死为 files.pythonhosted.org，
+    # 先导出只含版本与哈希的清单，再按 .env 的镜像地址安装。
+    requirements = TMP_DIR / "ai-service-requirements.txt"
+    requirements.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        [
+            "uv",
+            "export",
+            "--frozen",
+            "--format",
+            "requirements-txt",
+            "--output-file",
+            str(requirements),
+        ],
+        cwd=AI_DIR,
     )
+    _run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--index-url",
+            _pypi_index_url(),
+            "--requirements",
+            str(requirements),
+        ],
+        cwd=AI_DIR,
+    )
+
+    if _ai_venv_python() is None or _ai_uvicorn() is None:
+        raise DeployError("ai-service 虚拟环境创建失败，请检查依赖安装输出。")
+    _ok("ai-service 依赖安装完成")
+    return True
 
 
 def _vite_binary(directory: Path) -> Path | None:
@@ -1088,6 +1156,9 @@ def reset_all_databases(assume_yes: bool = False) -> bool:
     )
     if customer_was_running:
         _stop_process("customer-service", "customer_service.app.app")
+    ai_was_running = _tracked_pid("ai-service", "ai_service.app.app") is not None
+    if ai_was_running:
+        _stop_process("ai-service", "ai_service.app.app")
 
     _info("删除数据卷并重建基础设施 ...")
     _compose("down", "-v", "--remove-orphans")
@@ -1136,6 +1207,9 @@ def reset_all_databases(assume_yes: bool = False) -> bool:
     if ecommerce_was_running:
         _info("恢复重置前正在运行的 ecommerce-service ...")
         deploy_ecommerce_service(rebuild=False)
+    if ai_was_running:
+        _info("恢复重置前正在运行的 ai-service ...")
+        deploy_ai_service()
     if customer_was_running:
         _info("恢复重置前正在运行的 customer-service ...")
         deploy_customer_service()
@@ -1249,11 +1323,47 @@ def deploy_ai_service() -> bool:
 
     _prepare()
     if not _ai_service_has_code():
-        _warn("ai-service 目录为空（尚未实现），跳过部署")
+        _warn("ai-service 目录为空，跳过部署")
         return False
-    raise DeployError(
-        "ai-service 目录中出现文件，但 deploy.py 尚未实现其部署逻辑，请先补充脚本。"
+    _ensure_ai_build()
+
+    host = env("AI_SERVICE_HOST", "127.0.0.1")
+    port = env_int("AI_SERVICE_PORT", 18002)
+    uvicorn = _ai_uvicorn()
+    if uvicorn is None:
+        raise DeployError("ai-service 虚拟环境中找不到 uvicorn。")
+
+    _section("部署 ai-service")
+    _stop_process("ai-service", "ai_service.app.app")
+    _ensure_port_free("ai-service", host, port)
+
+    process, log_path = _start_background(
+        "ai-service",
+        [
+            uvicorn,
+            "ai_service.app.app:app",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ],
+        AI_DIR,
     )
+    try:
+        _wait_http(
+            "ai-service",
+            _http_url(host, port, "/health"),
+            timeout=90.0,
+            process=process,
+            log_path=log_path,
+        )
+    except DeployError:
+        _stop_process("ai-service", "ai_service.app.app")
+        raise
+
+    _ok(f"ai-service：{_display_url(host, port)}")
+    _ok(f"接口文档：{_display_url(host, port, '/docs')}")
+    return True
 
 
 def _frontend_host(frontend: _Frontend) -> str:
@@ -1331,8 +1441,9 @@ def deploy_all_services(rebuild: bool = True) -> bool:
     ensure_environment()
     _section("开始部署全部服务")
     deploy_ecommerce_service(rebuild=rebuild)
-    deploy_customer_service()
+    # customer-service 的 TurnWorker 依赖 ai-service，先部署 ai-service
     deploy_ai_service()
+    deploy_customer_service()
     deploy_frontend()
     check_status()
     return True
@@ -1347,6 +1458,7 @@ def undeploy_all_services(remove_volumes: bool = False) -> bool:
     _section("停止并卸载全部服务")
 
     _stop_process("customer-service", "customer_service.app.app")
+    _stop_process("ai-service", "ai_service.app.app")
     for frontend in _FRONTENDS:
         _stop_process(frontend.name, "vite")
 
@@ -1460,7 +1572,18 @@ def check_status() -> bool:
         customer_detail = f"{customer_url}（未运行）"
     _status_line("customer-service", customer_up, customer_detail)
 
-    print(f"  {_paint('–', '90')} {'ai-service':<22} 尚未实现，跳过")
+    ai_host = env("AI_SERVICE_HOST", "127.0.0.1")
+    ai_port = env_int("AI_SERVICE_PORT", 18002)
+    ai_url = _display_url(ai_host, ai_port)
+    ai_pid = _tracked_pid("ai-service", "ai_service.app.app")
+    ai_up = _http_ok(_http_url(ai_host, ai_port, "/health"))
+    if ai_up:
+        ai_detail = ai_url
+    elif ai_pid is not None:
+        ai_detail = f"{ai_url}（进程运行中，接口未就绪）"
+    else:
+        ai_detail = f"{ai_url}（未运行）"
+    _status_line("ai-service", ai_up, ai_detail)
 
     frontend_status: list[bool] = []
     for frontend in _FRONTENDS:
@@ -1480,7 +1603,7 @@ def check_status() -> bool:
 
     print()
     print(f"  日志目录：{_rel(DEPLOY_LOG_DIR)}")
-    return all([ecommerce_up, customer_up, *frontend_status])
+    return all([ecommerce_up, customer_up, ai_up, *frontend_status])
 
 
 # ---------------------------------------------------------------------------
@@ -1602,6 +1725,7 @@ _DEPLOY_ORDER = (
     "postgres",
     "redis",
     "ecommerce",
+    "ai",
     "customer",
     "user-frontend",
     "admin-frontend",
@@ -1621,6 +1745,7 @@ _ENDPOINT_ENV = {
 _HEALTH_PATH = {
     "ecommerce": "/health",
     "customer": "/openapi.json",
+    "ai": "/health",
     "user-frontend": "/",
     "admin-frontend": "/",
 }
@@ -1732,6 +1857,8 @@ def _image_exists(image: str) -> bool:
 def _built_locally(spec: _Spec) -> bool:
     if spec.kind == "customer":
         return _customer_venv_python() is not None and _customer_uvicorn() is not None
+    if spec.kind == "ai":
+        return _ai_venv_python() is not None and _ai_uvicorn() is not None
     if spec.frontend is not None:
         return (
             spec.frontend.directory / "dist" / "index.html"
@@ -1800,6 +1927,8 @@ def _build_row(spec: _Spec) -> None:
         build_ecommerce_service()
     elif spec.kind == "customer":
         build_customer_service()
+    elif spec.kind == "ai":
+        build_ai_service()
     elif spec.frontend is not None:
         _prepare()
         _require_command("node", "请安装 Node.js 18 或更高版本。")
@@ -1828,6 +1957,13 @@ def _deploy_row(spec: _Spec, force_build: bool) -> None:
             build_customer_service()
             _set_phase("Deploying")
         deploy_customer_service()
+    elif spec.kind == "ai":
+        _prepare()
+        if force_build or not _row_built(spec):
+            _set_phase("Building")
+            build_ai_service()
+            _set_phase("Deploying")
+        deploy_ai_service()
     elif spec.frontend is not None:
         _prepare()
         if force_build or not _row_built(spec):
@@ -1852,6 +1988,8 @@ def _row_process(spec: _Spec) -> tuple[str, str] | None:
 
     if spec.kind == "customer":
         return "customer-service", "customer_service.app.app"
+    if spec.kind == "ai":
+        return "ai-service", "ai_service.app.app"
     if spec.frontend is not None:
         return spec.frontend.name, "vite"
     return None
@@ -1956,9 +2094,6 @@ def _docker_info() -> _DockerInfo:
 def _probe_row(
     spec: _Spec, docker: _DockerInfo, meta: dict[str, tuple[str, str]]
 ) -> _RowInfo:
-    if spec.kind == "ai":
-        return _RowInfo("missing", "Not implemented")
-
     host, port = _endpoint(spec)
     info = _RowInfo(url=_row_url(spec, host, port), port=port)
     info.listening = _tcp_ok(host, port)
@@ -2896,7 +3031,7 @@ class _Tui:
         """当前可用的 Status 页快捷键；不可用的操作不展示。"""
 
         spec = _SPECS[self.sel]
-        row_ready = spec.kind != "ai" and not self.runner.has_row(spec.key)
+        row_ready = not self.runner.has_row(spec.key)
         options: list[_Option] = []
         if row_ready:
             options.extend(
@@ -2978,8 +3113,6 @@ class _Tui:
             if kind == "queued":
                 return s["queued"], a["gray"], "Queued...", a["gray"]
             return s["failed"], a["red"], f"Failed: {job.error}", a["red"]
-        if spec.kind == "ai":
-            return s["missing"], a["gray"], "Not implemented", a["gray"]
         attr = 0 if info.state == "online" else a["gray"]
         icon = a["gray" if info.state == "ready" else _STATE_COLOR[info.state]]
         return s[info.state], icon, _clean(info.url), attr
@@ -3004,9 +3137,7 @@ class _Tui:
             info = rows.get(spec.key, _RowInfo())
             state = view.get(spec.key)
             icon, icon_attr, text, attr = self._row_view(spec, info, state)
-            merged = (
-                spec.kind == "ai" or (state[0] if state else info.state) == "failed"
-            )
+            merged = (state[0] if state else info.state) == "failed"
             start = len(lines)
             details = (
                 _wrap_lines(text.splitlines() or [""], detail_width)
@@ -3058,9 +3189,7 @@ class _Tui:
             except DeployError:
                 continue
             info = rows.get(spec.key)
-            if spec.kind == "ai":
-                state = "missing"
-            elif info is None:
+            if info is None:
                 state = "unknown"
             elif info.state == "online":
                 state = "online"
@@ -3621,9 +3750,7 @@ class _Tui:
 
     def _act_row(self, action: str) -> None:
         spec = _SPECS[self.sel]
-        if spec.kind == "ai":
-            self.flash("ai-service is not implemented yet.")
-        elif self.runner.has_row(spec.key):
+        if self.runner.has_row(spec.key):
             self.flash(f"{spec.name} already has a pending task.")
         else:
             self.runner.submit([_make_job(action, spec)])

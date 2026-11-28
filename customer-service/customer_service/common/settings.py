@@ -90,6 +90,10 @@ class Settings(BaseSettings):
         3, ge=1, description="日志文件保留天数"
     )
 
+    ai_timeout_seconds: int = Field(30, description="AI Service 请求的超时时间（秒）")
+    ai_service_host: str = Field("127.0.0.1", description="服务的监听地址")
+    ai_service_port: int = Field(18002, description="服务的监听端口")
+
     @property
     def log_dir(self) -> Path:
         """日志文件输出目录，未配置时使用项目顶层目录下的默认路径。"""
@@ -130,6 +134,11 @@ class Settings(BaseSettings):
             f"@{host}:{self.postgres_port}/{database}"
         )
 
+    @computed_field(description="AI Service 的 URL")
+    @property
+    def ai_service_url(self) -> str:
+        return f"http://{self.ai_service_host}:{self.ai_service_port}"
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -140,3 +149,4 @@ if __name__ == "__main__":
     settings = get_settings()
 
     print(settings.postgres_url)
+    print(settings.ai_service_url)

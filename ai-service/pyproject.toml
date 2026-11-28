@@ -1,0 +1,18 @@
+[project]
+name = "ai-service"
+version = "0.1.0"
+description = "AI 服务"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.116.0",
+    "pydantic-settings>=2.10.1",
+    "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff==0.17.6",
+]
+
+[tool.ruff.lint]
+extend-select = ["I"]
