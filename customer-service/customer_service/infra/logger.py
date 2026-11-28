@@ -38,6 +38,11 @@ FILE_FORMAT = (
 )
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# 业务日志专用 logger。Handler 只挂在它上面，不改动 root：
+# 第三方库（如 httpcore/httpx）的日志仍冒泡到默认 WARNING 的 root，
+# 它们的 DEBUG/INFO 在 isEnabledFor 阶段就会被丢弃。
+PROJECT_LOGGER_NAME = "app"
+
 
 class ColorFormatter(logging.Formatter):
     """Colorized console log formatter."""
@@ -153,21 +158,23 @@ def setup_logger() -> None:
     file_level = _resolve_level(settings.customer_service_log_file_level)
     console_level = _resolve_level(settings.customer_service_log_console_level)
 
-    root_logger = logging.getLogger()
+    project_logger = logging.getLogger(PROJECT_LOGGER_NAME)
     # 先按两个通道中更低的阈值放行，再由各 Handler 自己过滤
-    root_logger.setLevel(min(file_level, console_level))
+    project_logger.setLevel(min(file_level, console_level))
+    # 业务日志不向 root 冒泡，避免混入第三方库日志或重复输出
+    project_logger.propagate = False
 
-    console_handler = _find_handler(root_logger, "_console_handler")
+    console_handler = _find_handler(project_logger, "_console_handler")
     if console_handler is None:
         console_handler = logging.StreamHandler()
         console_handler._console_handler = True
-        root_logger.addHandler(console_handler)
+        project_logger.addHandler(console_handler)
     console_handler.setLevel(console_level)
     console_handler.setFormatter(
         ColorFormatter(fmt=CONSOLE_FORMAT, datefmt=DATE_FORMAT)
     )
 
-    file_handler = _find_handler(root_logger, "_file_handler")
+    file_handler = _find_handler(project_logger, "_file_handler")
     if file_handler is None:
         try:
             file_handler = DailyFileHandler(
@@ -175,14 +182,14 @@ def setup_logger() -> None:
                 retention_days=settings.customer_service_log_retention_days,
             )
         except (OSError, ValueError) as exc:
-            root_logger.warning(
+            project_logger.warning(
                 f"Failed to create log directory {settings.log_dir}, "
                 f"skipping file logging: {exc}"
             )
             return
 
         file_handler._file_handler = True
-        root_logger.addHandler(file_handler)
+        project_logger.addHandler(file_handler)
 
     file_handler.setLevel(file_level)
     file_handler.setFormatter(logging.Formatter(fmt=FILE_FORMAT, datefmt=DATE_FORMAT))
@@ -192,7 +199,7 @@ def setup_logger() -> None:
 setup_logger()
 
 # Project logger
-LOG = logging.getLogger("app")
+LOG = logging.getLogger(PROJECT_LOGGER_NAME)
 
 if __name__ == "__main__":
     LOG.debug("This is a DEBUG message.")
