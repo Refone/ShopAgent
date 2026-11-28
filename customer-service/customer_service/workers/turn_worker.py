@@ -13,12 +13,10 @@ from customer_service.schemas.enums import TurnStatus
 
 
 class TurnWorker:
-    """
-    轮询 ConversationTurn 表, 领取会话轮次, 交给 AI Service
-    """
+    """Claim conversation turns and dispatch them to the AI service."""
 
     HISTORY_TRACE_LIMIT: int = 20
-    """历史消息往前回溯的最大条数"""
+    """Maximum number of historical messages to look back."""
 
     def __init__(self):
         self._worker_id = str(os.getpid())
@@ -27,9 +25,7 @@ class TurnWorker:
         self._interval_ms = self._settings.turn_worker_pull_interval_ms
 
     async def start(self) -> None:
-        """
-        启动 turn-worker
-        """
+        """Start the turn worker."""
 
         while True:
             try:
@@ -45,15 +41,14 @@ class TurnWorker:
                 await asyncio.sleep(self._interval_ms / 1000)
 
     async def _claim_turn_and_process(self) -> bool:
-        """
-        领取并处理一个会话轮次
+        """Claim and process one conversation turn.
 
         Returns:
-            本轮是否领取到轮次；未领取到时由调用方按轮询间隔休眠。
+            Whether a turn was claimed. The caller sleeps when no turn was claimed.
         """
 
         async with self._session_factory() as session:
-            # 尝试领取一个待处理的会话轮次
+            # Try to claim a pending conversation turn.
             turn = await self._claim_turn(session)
 
             if turn is None:
@@ -61,36 +56,37 @@ class TurnWorker:
 
             LOG.info(f"Claimed turn: {turn}")
 
-            # 构建 AI Service 需要的 payload
+            # Build the payload required by the AI service.
             payload = await self._build_ai_request_payload(session, turn)
 
-            # 更新 turn 的状态 COLLECTING -> RUNNING, 避免被其他 worker 重复领取
+            # Mark the turn RUNNING to prevent duplicate claims by other workers.
             turn.status = TurnStatus.RUNNING
 
             # 释放 Turn 的行锁，在等待 AI Service 处理时不阻塞其他事务,
             # 如果出现插话等情况，由 _handle_ai_result 处理
             await session.commit()
 
-            # 由 worker 去请求 AI service，通过 ai 判断如何处理用户询问
+            # Call the AI service and let it decide how to handle the user request.
             ai_result = await self._send_to_ai_service(payload)
 
-            # 处理 AI Service 的响应结果, 传入 turn 是需要判断有无插话
+            # Handle the AI response; the turn is passed in to detect interjections.
             await self._handle_ai_result(session, turn, ai_result)
 
-            # 提交 Turn 的状态变化
+            # Commit the turn status change.
             await session.commit()
             return True
 
     async def _claim_turn(self, session: AsyncSession) -> ConversationTurn | None:
-        """
-        领取一个会话轮次，只领取 COLLECTING 状态，避免重复处理进行中的轮次
+        """Claim one turn in COLLECTING state.
+
+        This avoids processing a turn that is already running.
         """
 
-        # 查询数据库中处于运行状态的会话轮次，按创建顺序先到先处理
+        # Select pending COLLECTING turns in creation order, oldest first.
         db_result = await session.execute(
             select(ConversationTurn)
             .where(ConversationTurn.status.in_([TurnStatus.COLLECTING]))
-            .order_by(ConversationTurn.id)  # 先到先处理
+            .order_by(ConversationTurn.id)  # Process oldest first.
             .limit(1)
             .with_for_update(of=ConversationTurn, skip_locked=True)
         )
@@ -100,9 +96,7 @@ class TurnWorker:
     async def _build_ai_request_payload(
         self, session: AsyncSession, turn: ConversationTurn
     ) -> dict[str, Any]:
-        """
-        根据 turn 构建发送给 AI Service 的请求 payload
-        """
+        """Build the AI service request payload from a turn."""
 
         conversation_id = turn.conversation_id
 
@@ -121,7 +115,8 @@ class TurnWorker:
 
         first_message_id = current_turn_messages[0].id
 
-        # 先按倒序取最近 N 条，再翻转回时间正序，供 AI 理解上下文
+        # Fetch the latest N messages in reverse order, then restore chronological
+        # order so the AI can understand the conversation context.
         result = await session.execute(
             select(Message)
             .where(
@@ -156,12 +151,10 @@ class TurnWorker:
         }
 
     async def _send_to_ai_service(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """
-        将领取到的 turn 交给 AI Service 处理，并返回 AI Service 的响应结果
-        """
+        """Send a claimed turn to the AI service and return its response."""
         LOG.info(f"Send AI Service request with payload: {payload}")
 
-        # 调用 AI Service 处理请求
+        # Call the AI service.
         try:
             timeout = httpx.Timeout(self._settings.ai_timeout_seconds, connect=5)
             async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -175,13 +168,14 @@ class TurnWorker:
                 data = response.json()
                 if not isinstance(data, dict):
                     raise TypeError(
-                        f"AI Service 返回了非对象 JSON: {type(data).__name__}"
+                        f"AI Service returned non-object JSON: {type(data).__name__}"
                     )
                 return data
 
         except (httpx.HTTPError, TypeError, ValueError) as exc:
             LOG.exception(
-                f"会话 {payload['conversation_id']} 调用 AI Service 失败: {exc}"
+                f"Conversation {payload['conversation_id']} "
+                f"failed to call AI service: {exc}"
             )
             return {"status": "failed", "error": str(exc)}
 
@@ -191,11 +185,11 @@ class TurnWorker:
         turn: ConversationTurn,
         ai_result: dict[str, Any],
     ) -> None:
-        """
-        处理 AI Service 的响应结果
+        """Handle the AI service response.
 
-        重新锁定轮次，判断结果是否仍然有效：用户插话会递增 revision，
-        此时把轮次退回 COLLECTING，让下一次请求携带新消息重新处理。
+        Relock the turn to check whether the result is still valid. A user
+        interjection increments the revision, in which case the turn is moved
+        back to COLLECTING and processed again with the new messages.
         """
         LOG.info(f"AI service returned result: {ai_result}")
 

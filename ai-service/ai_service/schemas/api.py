@@ -11,14 +11,13 @@ class MessageContent(BaseModel):
 
 
 class ReplyType(StrEnum):
-    """
-    回复类型
+    """Reply type returned by the AI service.
 
     Attributes:
-        ANSWER: 正常回复
-        REQUEST_HANDOFF: 转接人工请求
-        CLARIFY: 澄清（没有明确订单号，缺乏必要信息）
-        DECLINE: 拒绝（业务无关）
+        ANSWER: Normal answer.
+        REQUEST_HANDOFF: Request to hand off to a human agent.
+        CLARIFY: Clarification needed (missing order id or required information).
+        DECLINE: Declined because the request is out of scope.
     """
 
     ANSWER = "ANSWER"
@@ -33,20 +32,21 @@ class AgentRunRequest(BaseModel):
     turn_revision: int
     history: list[MessageContent]
     messages: list[MessageContent] = Field(
-        min_length=1, description="本轮次需要处理的用户消息"
+        min_length=1, description="User messages to process in this turn."
     )
 
 
 class AgentRunResponse(BaseModel):
-    status: str = Field(description="响应状态")
-    revision: int = Field(description="会话轮次修订号, 判断轮次是否过期")
-    reply_type: ReplyType = Field(description="回复类型, 见 ReplyType 枚举")
-    reply_text: str = Field(description="可直接展示给用户的回复文本")
+    status: str = Field(description="Response status.")
+    revision: int = Field(description="Turn revision, used to detect stale results.")
+    reply_type: ReplyType = Field(description="Reply type, see the ReplyType enum.")
+    reply_text: str = Field(description="Reply text that can be shown to the user.")
 
     handoff_summary: str | None = Field(
         default=None,
-        description="仅当 reply_type 为 REQUEST_HANDOFF 时，提供转接人工摘要",
+        description="Handoff summary, only set for REQUEST_HANDOFF replies.",
     )
     page_action: str | None = Field(
-        default=None, description="仅当 AI 建议进行数据库写操作时，提供页面跳转链接"
+        default=None,
+        description="Suggested page URL for a database write operation.",
     )

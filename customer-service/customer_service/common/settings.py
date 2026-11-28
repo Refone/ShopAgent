@@ -17,7 +17,10 @@ LogLevel = Annotated[
 
 
 def _frontend_origins(host: str, port: int) -> list[str]:
-    """根据前端监听地址派生浏览器 Origin，本地监听时兼容 localhost。"""
+    """Derive browser origins from a frontend bind address.
+
+    Local binds also include localhost.
+    """
 
     hosts = {host}
     if host in {"127.0.0.1", "localhost"}:
@@ -38,72 +41,85 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
 
     # PostgreSQL
-    postgres_host: str = Field("127.0.0.1", description="PostgreSQL数据库的主机地址")
-    postgres_port: int = Field(5432, description="PostgreSQL数据库的端口")
-    postgres_user: str = Field(
-        "customer_service", description="PostgreSQL数据库的用户名"
-    )
+    postgres_host: str = Field("127.0.0.1", description="PostgreSQL host.")
+    postgres_port: int = Field(5432, description="PostgreSQL port.")
+    postgres_user: str = Field("customer_service", description="PostgreSQL user name.")
     postgres_password: str = Field(
-        "customer_service", description="PostgreSQL数据库的密码"
+        "customer_service", description="PostgreSQL password."
     )
     customer_service_db: str = Field(
-        "customer_service", description="customer-service 使用的数据库名"
+        "customer_service", description="Database name used by customer-service."
     )
 
     # JWT
-    jwt_secret: str = Field("ecommerce-secret", description="jwt秘钥")
-    jwt_algorithm: str = Field("HS256", description="jwt加密以及解密的算法")
+    jwt_secret: str = Field("ecommerce-secret", description="JWT secret.")
+    jwt_algorithm: str = Field(
+        "HS256", description="JWT signing and verification algorithm."
+    )
 
     # FastAPI
-    customer_service_host: str = Field("0.0.0.0", description="服务的监听地址")
-    customer_service_port: int = Field(8000, description="服务的监听端口")
+    customer_service_host: str = Field("0.0.0.0", description="Service bind host.")
+    customer_service_port: int = Field(8000, description="Service bind port.")
 
-    # Frontend（CORS 白名单由以下地址派生）
-    user_frontend_host: str = Field("127.0.0.1", description="用户前端监听地址")
-    user_frontend_port: int = Field(18100, description="用户前端监听端口")
-    admin_frontend_host: str = Field("127.0.0.1", description="管理前端监听地址")
-    admin_frontend_port: int = Field(18101, description="管理前端监听端口")
+    # Frontend (CORS allowlist is derived from the following addresses)
+    user_frontend_host: str = Field("127.0.0.1", description="User frontend bind host.")
+    user_frontend_port: int = Field(18100, description="User frontend bind port.")
+    admin_frontend_host: str = Field(
+        "127.0.0.1", description="Admin frontend bind host."
+    )
+    admin_frontend_port: int = Field(18101, description="Admin frontend bind port.")
 
     # Conversation Settings
     conversation_idle_timeout_seconds: int = Field(
-        600, description="AI模式下会话的有效时间, 超时会自动结束"
+        600,
+        description=(
+            "Idle timeout for AI conversations; expired conversations are closed "
+            "automatically."
+        ),
     )
     message_merge_delay_ms: int = Field(
-        1000, description="AI模式下消息的防抖时间窗口阈值"
+        1000, description="Debounce window for messages in AI conversations."
     )
 
     # Turn Worker Settings
-    turn_worker_pull_interval_ms: int = Field(2000, description="Turn Worker 轮询间隔")
+    turn_worker_pull_interval_ms: int = Field(
+        2000, description="Polling interval for the turn worker."
+    )
 
     # Logging
     customer_service_log_dir: str = Field(
         "",
-        description="日志文件输出目录，相对路径基于项目顶层目录；默认 var/logs/customer-service",
+        description=(
+            "Log file output directory; relative paths are resolved from the "
+            "project root. Defaults to var/logs/customer-service."
+        ),
     )
     customer_service_log_file_level: LogLevel = Field(
-        "DEBUG", description="写入文件的日志级别阈值"
+        "DEBUG", description="Minimum level for the file log handler."
     )
     customer_service_log_console_level: LogLevel = Field(
-        "INFO", description="控制台（串口）输出的日志级别阈值"
+        "INFO", description="Minimum level for the console log handler."
     )
     customer_service_log_retention_days: int = Field(
-        3, ge=1, description="日志文件保留天数"
+        3, ge=1, description="Number of days to keep log files."
     )
 
-    ai_timeout_seconds: int = Field(30, description="AI Service 请求的超时时间（秒）")
-    ai_service_host: str = Field("127.0.0.1", description="服务的监听地址")
-    ai_service_port: int = Field(18002, description="服务的监听端口")
+    ai_timeout_seconds: int = Field(
+        30, description="Timeout for requests to the AI service, in seconds."
+    )
+    ai_service_host: str = Field("127.0.0.1", description="AI service host.")
+    ai_service_port: int = Field(18002, description="AI service port.")
 
     @property
     def log_dir(self) -> Path:
-        """日志文件输出目录，未配置时使用项目顶层目录下的默认路径。"""
+        """Log file output directory, falling back to the project default."""
         configured = self.customer_service_log_dir.strip()
         directory = Path(configured).expanduser() if configured else DEFAULT_LOG_DIR
         if not directory.is_absolute():
             directory = PROJECT_ROOT / directory
         return directory
 
-    @computed_field(description="允许跨域访问的前端地址")
+    @computed_field(description="Frontend origins allowed by CORS.")
     @property
     def cors_origins(self) -> list[str]:
         return list(
@@ -119,7 +135,7 @@ class Settings(BaseSettings):
             )
         )
 
-    @computed_field(description="PostgreSQL数据库的地址")
+    @computed_field(description="PostgreSQL connection URL.")
     @property
     def postgres_url(self) -> str:
         user = quote(self.postgres_user, safe="")
@@ -134,7 +150,7 @@ class Settings(BaseSettings):
             f"@{host}:{self.postgres_port}/{database}"
         )
 
-    @computed_field(description="AI Service 的 URL")
+    @computed_field(description="AI service URL.")
     @property
     def ai_service_url(self) -> str:
         return f"http://{self.ai_service_host}:{self.ai_service_port}"

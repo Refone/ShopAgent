@@ -32,25 +32,25 @@ def test_user_frontend_chat_flow(
     chat_user: str,
 ) -> None:
     """
-    看护 user-frontend 聊天主流程：
-    1. 发送一条消息，接口正常响应；
-    2. 同一 message_id 重复发送不重复落库；
-    3. history 接口返回当前会话与历史消息；
-    4. conversations、messages、conversation_turns 均能查询到对应记录。
+    Cover the user-frontend chat flow:
+    1. Sending a message returns a successful response;
+    2. Sending the same message_id again does not create duplicates;
+    3. The history endpoint returns the current conversation and messages;
+    4. conversations, messages, and conversation_turns all contain the records.
     """
 
     message_id = f"msg_test_{uuid.uuid4().hex}"
 
-    # 1. 聊天页输入消息后发送。
+    # 1. Send a message from the chat page.
     send_response = _post_chat_message(api_client, customer_headers, message_id)
     assert send_response.status_code == 200, send_response.text
     assert send_response.json()["message_id"] == message_id
 
-    # 2. 重试/重复提交不应产生第二条消息或第二个轮次。
+    # 2. Retries/duplicates must not create a second message or turn.
     duplicate_response = _post_chat_message(api_client, customer_headers, message_id)
     assert duplicate_response.status_code == 200, duplicate_response.text
 
-    # 3. 进入聊天页时加载历史消息。
+    # 3. Load history when entering the chat page.
     history_response = api_client.get(
         "/api/v1/chat/history",
         headers=customer_headers,
@@ -67,7 +67,7 @@ def test_user_frontend_chat_flow(
     assert history_message["role"] == "USER"
     assert history_message["content"] == {"text": CHAT_TEXT}
 
-    # 4. 校验数据库落库结果。测试用户是隔离的，因此每个查询都应只有一条记录。
+    # 4. Verify persisted rows. The test user is isolated, so each query returns one row.
     with db_engine.connect() as connection:
         conversations = (
             connection.execute(

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""ShopAgent 一键式部署脚本。
+"""One-click deployment script for ShopAgent.
 
-不带参数运行时进入 htop 风格的 TUI；带子命令时用于 CI 等非交互场景，例如：
+Run without arguments to open the htop-style TUI; use subcommands for CI and
+other non-interactive scenarios, for example:
 
     python deploy.py deploy
     python deploy.py build frontend
@@ -128,11 +129,11 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 class DeployError(RuntimeError):
-    """可预期的部署错误，由入口统一打印。"""
+    """Expected deployment error, printed by the CLI entry point."""
 
 
 def _emit(text: str = "", *, err: bool = False) -> None:
-    """输出文本：任务线程中写入任务日志，否则打印到终端。"""
+    """Emit text: write to the task log inside a task thread, otherwise print."""
 
     sink = getattr(_CTX, "sink", None)
     if sink is None:
@@ -167,7 +168,7 @@ def _error(message: str) -> None:
 
 
 def _check_cancel() -> None:
-    """当前任务被用户取消时抛出 DeployError，供等待循环及时退出。"""
+    """Raise DeployError when the current task is cancelled so wait loops exit."""
 
     job = getattr(_CTX, "job", None)
     if job is not None and job.cancelled:
@@ -175,7 +176,7 @@ def _check_cancel() -> None:
 
 
 def _kill_process_group(process: subprocess.Popen, sig: int = signal.SIGTERM) -> None:
-    """向子进程所在进程组发送信号。"""
+    """Send a signal to the process group of a child process."""
 
     try:
         if hasattr(os, "killpg"):
@@ -208,7 +209,7 @@ _FRONTENDS = (
 
 
 # ---------------------------------------------------------------------------
-# 环境变量与配置
+# Environment variables and configuration
 # ---------------------------------------------------------------------------
 
 
@@ -246,7 +247,7 @@ def _read_env_file(path: Path = ENV_FILE) -> dict[str, str]:
 
 
 def load_env(refresh: bool = False) -> dict[str, str]:
-    """读取 .env，并让进程环境变量覆盖文件中的同名配置。"""
+    """Load .env; process environment variables override the file."""
 
     global _ENV_CACHE
     if _ENV_CACHE is None or refresh:
@@ -313,9 +314,7 @@ def _prepare() -> None:
 
 
 def create_env(force: bool = False) -> bool:
-    """
-    通过 .env.example 创建 .env 文件
-    """
+    """Create the .env file from .env.example."""
 
     if ENV_FILE.exists() and not force:
         _info(f"{_rel(ENV_FILE)} 已存在，跳过创建（如需覆盖使用 --force）")
@@ -331,7 +330,7 @@ def create_env(force: bool = False) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 命令、进程与 HTTP 工具
+# Command, process, and HTTP helpers
 # ---------------------------------------------------------------------------
 
 
@@ -341,7 +340,11 @@ def _run_streamed(
     env_values: dict[str, str] | None,
     timeout: float | None,
 ) -> subprocess.CompletedProcess[str]:
-    """TUI 任务线程中执行命令：输出逐行写入任务日志，支持取消与超时。"""
+    """Run a command in a TUI task thread.
+
+    Output is streamed line by line to the task log; supports cancellation and
+    timeout.
+    """
 
     sink = _CTX.sink
     job = getattr(_CTX, "job", None)
@@ -683,7 +686,10 @@ def _listening_pids(port: int) -> list[int]:
 
 
 def _process_home(name: str) -> tuple[Path, str, int, tuple[str, ...]] | None:
-    """返回后台进程所属目录、监听地址，以及认领时命令行必须包含的标识。"""
+    """Return the working directory, bind address, and command-line marker.
+
+    The marker is used to claim the background process.
+    """
 
     if name == "customer-service":
         host = env("CUSTOMER_SERVICE_HOST", "127.0.0.1")
@@ -702,7 +708,10 @@ def _process_home(name: str) -> tuple[Path, str, int, tuple[str, ...]] | None:
 
 
 def _recover_pid(name: str) -> int | None:
-    """PID 文件丢失时，认领本检出启动、仍在监听端口的进程。"""
+    """Claim a process started from this checkout when the PID file is missing.
+
+    The process must still be listening on the configured port.
+    """
 
     home = _process_home(name)
     if home is None:
@@ -824,14 +833,12 @@ def _start_background(
 
 
 # ---------------------------------------------------------------------------
-# 构建
+# Build
 # ---------------------------------------------------------------------------
 
 
 def build_ecommerce_service() -> bool:
-    """
-    构建电商服务
-    """
+    """Build the ecommerce service."""
 
     _prepare()
     _require_docker()
@@ -863,19 +870,18 @@ def _ensure_customer_build() -> None:
 
 
 def _pypi_index_url() -> str:
-    """返回安装 Python 依赖使用的 PyPI 镜像地址。
+    """Return the PyPI mirror URL used to install Python dependencies.
 
-    只由 .env 的 PIP_MIRROR_HOST（域名）决定，默认公网阿里云；
-    腾讯云服务器可改为 mirrors.tencentyun.com（内网，4-7 MB/s）。
+    Determined only by PIP_MIRROR_HOST (domain) in .env; defaults to the public
+    Aliyun mirror. Tencent Cloud servers can use mirrors.tencentyun.com (internal,
+    4-7 MB/s).
     """
 
     return f"https://{env('PIP_MIRROR_HOST', 'mirrors.aliyun.com')}/pypi/simple/"
 
 
 def build_customer_service() -> bool:
-    """
-    构建客户服务
-    """
+    """Build the customer service."""
 
     _prepare()
     _require_command("uv", "请先安装 uv：https://docs.astral.sh/uv/")
@@ -955,9 +961,7 @@ def _ai_service_has_code() -> bool:
 
 
 def build_ai_service() -> bool:
-    """
-    构建 AI 服务
-    """
+    """Build the AI service."""
 
     _prepare()
     if not _ai_service_has_code():
@@ -1041,9 +1045,7 @@ def _build_frontend(frontend: _Frontend) -> None:
 
 
 def build_frontend() -> bool:
-    """
-    构建前端
-    """
+    """Build the frontend."""
 
     _prepare()
     _require_command("node", "请安装 Node.js 18 或更高版本。")
@@ -1063,7 +1065,7 @@ def build_all_services() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 数据库
+# Database
 # ---------------------------------------------------------------------------
 
 
@@ -1133,9 +1135,7 @@ def _reset_ai_database() -> None:
 
 
 def reset_all_databases(assume_yes: bool = False) -> bool:
-    """
-    重置数据库
-    """
+    """Reset databases."""
 
     _prepare()
     _require_docker()
@@ -1217,7 +1217,7 @@ def reset_all_databases(assume_yes: bool = False) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 部署
+# Deployment
 # ---------------------------------------------------------------------------
 
 
@@ -1238,9 +1238,7 @@ def _show_compose_logs(service: str, lines: int = 60) -> None:
 
 
 def deploy_ecommerce_service(rebuild: bool = True) -> bool:
-    """
-    部署电商服务
-    """
+    """Deploy the ecommerce service."""
 
     _prepare()
     _require_docker()
@@ -1268,9 +1266,7 @@ def deploy_ecommerce_service(rebuild: bool = True) -> bool:
 
 
 def deploy_customer_service() -> bool:
-    """
-    部署客户服务
-    """
+    """Deploy the customer service."""
 
     _prepare()
     _ensure_customer_build()
@@ -1317,9 +1313,7 @@ def deploy_customer_service() -> bool:
 
 
 def deploy_ai_service() -> bool:
-    """
-    部署 AI 服务
-    """
+    """Deploy the AI service."""
 
     _prepare()
     if not _ai_service_has_code():
@@ -1423,9 +1417,7 @@ def _deploy_frontend(frontend: _Frontend) -> None:
 
 
 def deploy_frontend() -> bool:
-    """
-    部署前端
-    """
+    """Deploy the frontend."""
 
     _prepare()
     for frontend in _FRONTENDS:
@@ -1434,9 +1426,7 @@ def deploy_frontend() -> bool:
 
 
 def deploy_all_services(rebuild: bool = True) -> bool:
-    """
-    部署所有服务
-    """
+    """Deploy all services."""
 
     ensure_environment()
     _section("开始部署全部服务")
@@ -1450,9 +1440,7 @@ def deploy_all_services(rebuild: bool = True) -> bool:
 
 
 def undeploy_all_services(remove_volumes: bool = False) -> bool:
-    """
-    卸载所有服务
-    """
+    """Undeploy all services."""
 
     _prepare()
     _section("停止并卸载全部服务")
@@ -1482,7 +1470,7 @@ def undeploy_all_services(remove_volumes: bool = False) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 环境检查与状态
+# Environment checks and status
 # ---------------------------------------------------------------------------
 
 
@@ -1502,9 +1490,7 @@ def _check_node_version() -> None:
 
 
 def ensure_environment() -> bool:
-    """
-    检查环境配置
-    """
+    """Check environment configuration."""
 
     _section("检查部署环境")
     _prepare()
@@ -1536,9 +1522,7 @@ def _status_line(label: str, ok: bool, detail: str) -> None:
 
 
 def check_status() -> bool:
-    """
-    检查服务状态
-    """
+    """Check service status."""
 
     _section("服务状态")
     _prepare()
@@ -1607,7 +1591,7 @@ def check_status() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 命令行入口
+# CLI entry point
 # ---------------------------------------------------------------------------
 
 
@@ -1679,7 +1663,7 @@ def _deploy_selected(values: Sequence[str], rebuild: bool = True) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# TUI：服务清单与单行动作
+# TUI: service list and per-row actions
 # ---------------------------------------------------------------------------
 
 
@@ -1692,10 +1676,10 @@ class _Target:
 
 @dataclass(frozen=True)
 class _Spec(_Target):
-    """Status 页的一行：一个可构建、部署、卸载的服务。"""
+    """A Status page row: a service that can be built, deployed, and uninstalled."""
 
     kind: str  # ecommerce | customer | ai | frontend | infra
-    service: str = ""  # compose 服务名
+    service: str = ""  # Compose service name
     frontend: _Frontend | None = None
 
 
@@ -1732,7 +1716,7 @@ _DEPLOY_ORDER = (
 )
 _UNINSTALL_ORDER = tuple(reversed(_DEPLOY_ORDER))
 
-# 行 -> (主机变量, 端口变量, 默认端口)
+# Row -> (host env var, port env var, default port)
 _ENDPOINT_ENV = {
     "ecommerce": ("ECOMMERCE_SERVICE_HOST", "ECOMMERCE_SERVICE_PORT", 18001),
     "customer": ("CUSTOMER_SERVICE_HOST", "CUSTOMER_SERVICE_PORT", 18000),
@@ -1750,7 +1734,7 @@ _HEALTH_PATH = {
     "admin-frontend": "/",
 }
 
-# compose 服务 -> (镜像, 容器名)；compose config 不可用时作为回退
+# Compose service -> (image, container name); fallback when compose config is unavailable
 _COMPOSE_DEFAULTS = {
     "app": ("ecommerce-customer-service-app:latest", "ecommerce-app"),
     "postgres": ("pgvector/pgvector:pg16", "ecommerce-postgres"),
@@ -1760,7 +1744,7 @@ _COMPOSE_META: dict[str, tuple[str, str]] | None = None
 
 
 def _discard(_line: str) -> None:
-    """静默的日志出口，用于 UI 线程与探测线程。"""
+    """Silent log sink for UI and probe threads."""
 
 
 def _silence() -> None:
@@ -1779,7 +1763,7 @@ def _image_ref(image: str) -> str:
 
 
 def _compose_meta(refresh: bool = False) -> dict[str, tuple[str, str]]:
-    """通过 docker compose config 读取各服务的镜像与容器名。"""
+    """Read image and container names for each service from docker compose config."""
 
     global _COMPOSE_META
     if _COMPOSE_META is not None and not refresh:
@@ -1941,7 +1925,10 @@ def _build_row(spec: _Spec) -> None:
 
 
 def _deploy_row(spec: _Spec, force_build: bool) -> None:
-    """部署单行；force_build 为假时仅在缺少构建产物时先构建。"""
+    """Deploy one row.
+
+    When force_build is false, build first only if artifacts are missing.
+    """
 
     if spec.kind == "ecommerce":
         _prepare()
@@ -1984,7 +1971,10 @@ def _deploy_row(spec: _Spec, force_build: bool) -> None:
 
 
 def _row_process(spec: _Spec) -> tuple[str, str] | None:
-    """返回由本检出以后台进程方式管理的行对应的 PID 名称与命令标识。"""
+    """Return the PID name and command marker for a background-managed row.
+
+    The row must have been started from this checkout.
+    """
 
     if spec.kind == "customer":
         return "customer-service", "customer_service.app.app"
@@ -1996,7 +1986,11 @@ def _row_process(spec: _Spec) -> tuple[str, str] | None:
 
 
 def _uninstall_row(spec: _Spec, final: bool = False, volumes: bool = False) -> None:
-    """卸载单行；final 表示这是批量卸载的最后一项，改用 compose down 收尾。"""
+    """Uninstall one row.
+
+    final means this is the last item in a batch uninstall, which uses compose
+    down.
+    """
 
     _section(f"卸载 {spec.name}")
     process = _row_process(spec)
@@ -2026,7 +2020,7 @@ def _uninstall_row(spec: _Spec, final: bool = False, volumes: bool = False) -> N
 
 
 # ---------------------------------------------------------------------------
-# TUI：状态探测
+# TUI: status probing
 # ---------------------------------------------------------------------------
 
 
@@ -2165,7 +2159,10 @@ def _probe_tool(label: str) -> _Item:
 
 
 def _get_command(item: _Item) -> list[str]:
-    """返回确认框展示的原样命令；不执行 shell 或提升权限。"""
+    """Return the command exactly as shown in the confirmation dialog.
+
+    The command is not executed through a shell and does not elevate privileges.
+    """
 
     if item.target is None:
         raise DeployError("Select a tool or image to get.")
@@ -2245,7 +2242,10 @@ def _get_dependency(item: _Item, command: list[str]) -> None:
 
 
 class _Monitor:
-    """后台探测线程：定期刷新每行状态、Docker 信息与工具版本。"""
+    """Background probe thread.
+
+    Periodically refreshes row status, Docker info, and tool versions.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -2332,7 +2332,7 @@ class _Monitor:
 
 
 # ---------------------------------------------------------------------------
-# TUI：任务队列
+# TUI: task queue
 # ---------------------------------------------------------------------------
 
 
@@ -2376,7 +2376,10 @@ def _make_job(
 
 
 class _Runner:
-    """单 worker 线程串行执行任务；输出写入 var/logs/deploy/<服务>.log。"""
+    """Run tasks serially on a single worker thread.
+
+    Output goes to var/logs/deploy/<service>.log.
+    """
 
     def __init__(self, on_done: Callable[[], None]) -> None:
         self._cond = threading.Condition()
@@ -2519,7 +2522,7 @@ class _Runner:
 
 
 # ---------------------------------------------------------------------------
-# TUI：文本与绘制工具
+# TUI: text and drawing helpers
 # ---------------------------------------------------------------------------
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -2618,7 +2621,10 @@ def _wrap_lines(lines: Sequence[str], width: int) -> list[str]:
 
 
 def _max_offset(text: str, width: int, ell: str = "…") -> int:
-    """text 在 width 列内显示时，最大的起始字符偏移（尾部恰好放下）。"""
+    """Maximum start offset for rendering text within width columns.
+
+    At this offset the tail fits exactly.
+    """
 
     room = max(0, width - _text_width(ell))
     used = offset = 0
@@ -2636,7 +2642,11 @@ def _max_offset(text: str, width: int, ell: str = "…") -> int:
 def _window(
     text: str, width: int, offset: int = 0, ell: str = "…"
 ) -> tuple[str, int, int, int]:
-    """截取 text 的一个窗口，返回 (显示文本, 修正后的偏移, 头部省略号长度, 尾部省略号长度)。"""
+    """Take a window of text.
+
+    Return (display text, adjusted offset, leading ellipsis length, trailing
+    ellipsis length).
+    """
 
     if width <= 0:
         return "", 0, 0, 0
@@ -2670,7 +2680,7 @@ def _fit(
     ell_attr: int = 0,
     ell: str = "…",
 ) -> tuple[list[tuple[str, int]], int]:
-    """把带属性的文本片段按 _window 规则裁剪，省略号使用 ell_attr。"""
+    """Fit attributed text segments using the _window rule; ellipses use ell_attr."""
 
     text = "".join(piece for piece, _ in segs)
     shown, offset, head, tail = _window(text, width, offset, ell)
@@ -2705,7 +2715,11 @@ def _slice_segs(segs: Sequence[tuple[str, int]], start: int) -> list[tuple[str, 
 def _read_log(
     path: Path, max_bytes: int = 512 * 1024, max_lines: int = 5000
 ) -> list[str]:
-    """读取日志文件尾部，去除 ANSI 与控制字符，回车覆盖只保留最后一段。"""
+    """Read the tail of a log file.
+
+    Strips ANSI/control characters and keeps only the last carriage-return
+    segment.
+    """
 
     try:
         with path.open("rb") as handle:
@@ -2732,13 +2746,13 @@ class _Modal:
     title: str
     lines: list[str]
     hint: str = ""
-    # 键名（小写字符、esc、enter、any）-> 处理函数；按下后弹窗关闭再执行
+    # Key name (lowercase char, esc, enter, any) -> handler; close the popup before running
     keys: dict[str, Callable[[], None]] = field(default_factory=dict)
     danger: bool = False
 
 
 class _LogView:
-    """全屏日志查看器的状态。"""
+    """State of the full-screen log viewer."""
 
     def __init__(self, target: _Target) -> None:
         self.target = target
@@ -2767,10 +2781,10 @@ class _LogView:
 
 
 # ---------------------------------------------------------------------------
-# TUI：界面
+# TUI: interface
 # ---------------------------------------------------------------------------
 
-_Option = tuple[str, str, int | None]  # (键名, 描述, 热键下划线位置)
+_Option = tuple[str, str, int | None]  # (key, description, hotkey underline position)
 
 
 def _key_name(key: int) -> str:
@@ -2791,7 +2805,7 @@ def _tail_lines(job: _Job, count: int) -> list[str]:
 
 
 class _Tui:
-    """htop 风格的 curses 界面：Status / Config / Environment 三个页签。"""
+    """htop-style curses UI with Status / Config / Environment tabs."""
 
     TABS = ("Status", "Config", "Environment")
     TAB_KEYS = ("q", "w", "e")
@@ -2829,7 +2843,7 @@ class _Tui:
 
         self._init_terminal()
 
-    # -- 初始化 -----------------------------------------------------------
+    # -- Initialization ---------------------------------------------------
 
     def _init_terminal(self) -> None:
         try:
@@ -2881,7 +2895,7 @@ class _Tui:
                 pass
         self.a = a
 
-    # -- 绘制原语 ---------------------------------------------------------
+    # -- Drawing primitives -----------------------------------------------
 
     def put(self, y: int, x: int, text: str, attr: int = 0) -> int:
         if not text or y < 0 or y >= self.h or x < 0 or x >= self.w:
@@ -2904,7 +2918,10 @@ class _Tui:
         marquee: bool = True,
         offset: int | None = None,
     ) -> tuple[int, int]:
-        """在固定宽度内绘制文本。跑马灯在首尾稍作停留，短文本保持静止。"""
+        """Draw text within a fixed width.
+
+        Marquees pause briefly at both ends; short text stays static.
+        """
 
         if width <= 0:
             return 0, 0
@@ -2970,7 +2987,7 @@ class _Tui:
         self.flash_error = error
         self.flash_until = time.monotonic() + seconds
 
-    # -- 通用栏位 ---------------------------------------------------------
+    # -- Shared widgets ---------------------------------------------------
 
     def _draw_option(self, y: int, x: int, item: _Option) -> int:
         key, desc, underline = item
@@ -3028,7 +3045,7 @@ class _Tui:
         self._draw_options(0, (), right, floor=x)
 
     def _status_options(self) -> list[_Option]:
-        """当前可用的 Status 页快捷键；不可用的操作不展示。"""
+        """Available Status page shortcuts; unavailable actions are hidden."""
 
         spec = _SPECS[self.sel]
         row_ready = not self.runner.has_row(spec.key)
@@ -3094,7 +3111,7 @@ class _Tui:
             parts.append((f"  {queued} queued", a["gray"]))
         self.cell(y, 2, self.w - 4, parts)
 
-    # -- Status 页 --------------------------------------------------------
+    # -- Status page ------------------------------------------------------
 
     def _geometry(self) -> list[tuple[int, int]]:
         iw = self.w - 4
@@ -3178,7 +3195,7 @@ class _Tui:
                 if focused:
                     self.focus_span = offset, limit, width
 
-    # -- Environment 页 ---------------------------------------------------
+    # -- Environment page -------------------------------------------------
 
     def _env_items(self) -> tuple[list[_Item], list[_Item], list[_Item]]:
         rows, docker, meta, tools = self.monitor.snapshot()
@@ -3276,7 +3293,7 @@ class _Tui:
                     a["rev"] if focused else 0,
                 )
 
-    # -- Config 页 --------------------------------------------------------
+    # -- Config page ------------------------------------------------------
 
     def _config_lines(self) -> list[str] | None:
         try:
@@ -3329,7 +3346,7 @@ class _Tui:
         counter = f" {min(self.cfg_top + rows, len(lines))}/{len(lines)} "
         self.put(bottom, self.w - 3 - len(counter), counter, a["gray"])
 
-    # -- 弹窗、日志与整体绘制 ---------------------------------------------
+    # -- Popups, logs, and overall drawing --------------------------------
 
     def _draw_modal(self) -> None:
         modal, a, s = self.modal, self.a, self.sym
@@ -3456,7 +3473,7 @@ class _Tui:
             self._draw_modal()
         self.scr.refresh()
 
-    # -- 按键处理 ---------------------------------------------------------
+    # -- Key handling -----------------------------------------------------
 
     def handle(self, key: int) -> None:
         self.marquee_since = time.monotonic()
@@ -3746,7 +3763,7 @@ class _Tui:
         view.top = max(0, min(top, max_top))
         view.follow = view.top >= max_top
 
-    # -- 动作 -------------------------------------------------------------
+    # -- Actions ----------------------------------------------------------
 
     def _act_row(self, action: str) -> None:
         spec = _SPECS[self.sel]
@@ -3892,7 +3909,7 @@ class _Tui:
             danger=True,
         )
 
-    # -- 主循环 -----------------------------------------------------------
+    # -- Main loop --------------------------------------------------------
 
     def _tick(self) -> None:
         if self.modal is None and self.log is None:
@@ -3920,7 +3937,7 @@ def _tui_main(scr, monitor: _Monitor, runner: _Runner) -> None:
 
 
 def _run_tui() -> int:
-    """无参数运行时的交互界面入口。"""
+    """Entry point for the interactive UI when run without arguments."""
 
     if curses is None:
         _error("当前 Python 不支持 curses（Windows 可安装 windows-curses）。")

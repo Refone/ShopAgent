@@ -19,25 +19,30 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
 
     # FastAPI
-    ai_service_host: str = Field("127.0.0.1", description="服务的监听地址")
-    ai_service_port: int = Field(18002, description="服务的监听端口")
+    ai_service_host: str = Field("127.0.0.1", description="Service bind host.")
+    ai_service_port: int = Field(18002, description="Service bind port.")
 
     # Logging
     ai_service_log_dir: str = Field(
         "",
-        description="日志文件输出目录，相对路径基于项目顶层目录；默认 var/logs/ai-service",
+        description=(
+            "Log file output directory; relative paths are resolved from the "
+            "project root. Defaults to var/logs/ai-service."
+        ),
     )
     ai_service_log_file_level: LogLevel = Field(
-        "DEBUG", description="写入文件的日志级别阈值"
+        "DEBUG", description="Minimum level for the file log handler."
     )
     ai_service_log_console_level: LogLevel = Field(
-        "INFO", description="控制台（串口）输出的日志级别阈值"
+        "INFO", description="Minimum level for the console log handler."
     )
-    ai_service_log_retention_days: int = Field(3, ge=1, description="日志文件保留天数")
+    ai_service_log_retention_days: int = Field(
+        3, ge=1, description="Number of days to keep log files."
+    )
 
     @property
     def log_dir(self) -> Path:
-        """日志文件输出目录，未配置时使用项目顶层目录下的默认路径。"""
+        """Log file output directory, falling back to the project default."""
         configured = self.ai_service_log_dir.strip()
         directory = Path(configured).expanduser() if configured else DEFAULT_LOG_DIR
         if not directory.is_absolute():

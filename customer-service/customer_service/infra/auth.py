@@ -10,8 +10,8 @@ from customer_service.schemas.enums import UserRole
 
 
 class CurrentUser(BaseModel):
-    user_id: str = Field(title="用户 ID")
-    role: UserRole = Field(default=UserRole.USER, title="用户角色")
+    user_id: str = Field(title="User ID")
+    role: UserRole = Field(default=UserRole.USER, title="User role")
 
 
 def authorized_user(

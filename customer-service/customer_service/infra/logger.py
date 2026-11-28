@@ -7,13 +7,13 @@ from pathlib import Path
 
 from customer_service.common.settings import get_settings
 
-# ANSI 颜色定义
+# ANSI color codes
 COLORS = {
-    "DEBUG": "\033[37m",  # 灰色
-    "INFO": "\033[34m",  # 蓝色
-    "WARNING": "\033[38;5;208m",  # 橙色
-    "ERROR": "\033[31m",  # 红色
-    "CRITICAL": "\033[1;31m",  # 红色加粗
+    "DEBUG": "\033[37m",  # Gray
+    "INFO": "\033[34m",  # Blue
+    "WARNING": "\033[38;5;208m",  # Orange
+    "ERROR": "\033[31m",  # Red
+    "CRITICAL": "\033[1;31m",  # Bold red
 }
 
 RESET = "\033[0m"
@@ -40,7 +40,7 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 class ColorFormatter(logging.Formatter):
-    """彩色日志格式化器"""
+    """Colorized console log formatter."""
 
     def format(self, record: logging.LogRecord) -> str:
         # 复制 record，避免修改原始日志记录
@@ -53,9 +53,10 @@ class ColorFormatter(logging.Formatter):
 
 
 class DailyFileHandler(logging.FileHandler):
-    """按自然日写入 <YYYY-MM-DD>.log 的文件处理器。
+    """File handler that writes to daily log files named <YYYY-MM-DD>.log.
 
-    写入前检查日期，跨天后切换到新文件，并在启动和跨天时清理过期日志。
+    The date is checked before each write; after midnight the handler switches
+    to a new file and cleans up expired log files on startup and rollover.
     """
 
     def __init__(
@@ -104,7 +105,10 @@ class DailyFileHandler(logging.FileHandler):
         self._cleanup_expired()
 
     def _cleanup_expired(self) -> None:
-        """删除保留期之外的日志文件，保留最近 N 个自然日（含当天）。"""
+        """Delete log files outside the retention window.
+
+        Keep the latest N days, including today.
+        """
         if self.retention_days < 1:
             return
 
@@ -131,7 +135,7 @@ class DailyFileHandler(logging.FileHandler):
 def _resolve_level(name: str) -> int:
     level = logging.getLevelNamesMapping().get(name.strip().upper())
     if level is None:
-        raise ValueError(f"未知日志级别: {name!r}")
+        raise ValueError(f"Unknown log level: {name!r}")
     return level
 
 
@@ -143,7 +147,7 @@ def _find_handler(logger: logging.Logger, marker: str) -> logging.Handler | None
 
 
 def setup_logger() -> None:
-    """根据配置初始化控制台与按天文件两个日志通道。"""
+    """Initialize the console and daily-file log handlers from settings."""
 
     settings = get_settings()
     file_level = _resolve_level(settings.customer_service_log_file_level)
@@ -172,7 +176,8 @@ def setup_logger() -> None:
             )
         except (OSError, ValueError) as exc:
             root_logger.warning(
-                "无法创建日志目录 %s，已跳过文件日志: %s", settings.log_dir, exc
+                f"Failed to create log directory {settings.log_dir}, "
+                f"skipping file logging: {exc}"
             )
             return
 
@@ -183,23 +188,23 @@ def setup_logger() -> None:
     file_handler.setFormatter(logging.Formatter(fmt=FILE_FORMAT, datefmt=DATE_FORMAT))
 
 
-# 初始化
+# Setup logging on import
 setup_logger()
 
-# 创建项目 logger
+# Project logger
 LOG = logging.getLogger("app")
 
 if __name__ == "__main__":
-    LOG.debug("这是一条 DEBUG 调试信息")
-    LOG.info("这是一条 INFO 正常运行信息")
-    LOG.warning("这是一条 WARNING 警告信息")
-    LOG.error("这是一条 ERROR 错误信息")
-    LOG.critical("这是一条 CRITICAL 严重错误信息")
+    LOG.debug("This is a DEBUG message.")
+    LOG.info("This is an INFO message.")
+    LOG.warning("This is a WARNING message.")
+    LOG.error("This is an ERROR message.")
+    LOG.critical("This is a CRITICAL message.")
 
-    print("\n========== 日志测试完成 ==========\n")
+    LOG.info("Log test finished.")
 
-    # 测试异常日志
+    # Test exception logging
     try:
         result = 1 / 0
     except Exception:
-        LOG.exception("捕获到一个异常")
+        LOG.exception("Caught an exception during logging test.")

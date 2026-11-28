@@ -23,7 +23,10 @@ from customer_service.common.settings import Settings, get_settings
 
 
 def _delete_chat_user_data(engine: Engine, user_id: str) -> None:
-    """删除测试用户产生的会话及其从属记录，避免污染开发库。"""
+    """Delete conversations and related records created by a test user.
+
+    This avoids polluting the development database.
+    """
     params = {"user_id": user_id}
     with engine.begin() as connection:
         for table in ("conversation_turns", "messages"):
@@ -96,7 +99,7 @@ def db_engine(settings: Settings) -> Iterator[Engine]:
 
 @pytest.fixture
 def chat_user(db_engine: Engine) -> Iterator[str]:
-    """每个用例使用独立用户，结束后清理其全部会话数据。"""
+    """Give each test an isolated user and clean up its conversation data afterwards."""
     user_id = f"test_{uuid.uuid4().hex}"
     _delete_chat_user_data(db_engine, user_id)
     yield user_id

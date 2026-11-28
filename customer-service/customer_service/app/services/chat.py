@@ -23,16 +23,17 @@ class ChatService:
         payload: ChatMessageRequest,
     ):
         """
-        接受前端发送的消息并进行处理
-        1. 获取会话
-        2. 创建消息实体
-        3. 消息处理逻辑根据会话模式做分流
-        4. db session commit
+        Accept and process a message sent by the frontend.
+
+        1. Get or create the conversation.
+        2. Create the message entity.
+        3. Route message processing by conversation mode.
+        4. Commit the database session.
         """
 
         LOG.info(f"Accepting message from user_id={user_id} with payload={payload}")
 
-        # 重复提交防御
+        # Guard against duplicate submissions.
         db_result = await self._db.execute(
             select(Message).where(Message.uuid == payload.message_id)
         )
@@ -41,11 +42,11 @@ class ChatService:
             LOG.warning(f"Message already exists: {existing_message.uuid}")
             return payload
 
-        # 获取会话
+        # Ensure the conversation exists.
         conversation = await self._ensure_conversation(user_id)
         LOG.info(f"Ensured conversation {conversation.uuid}")
 
-        # 创建消息实体
+        # Create the message entity.
         new_message = Message(
             uuid=payload.message_id,
             conversation_id=conversation.id,
@@ -59,25 +60,25 @@ class ChatService:
 
         conversation.update_last_active()
 
-        # 根据会话模式分流处理
+        # Route processing by conversation mode.
         match conversation.mode:
             case ConversationMode.AI:
-                # AI 模式处理逻辑
+                # AI mode.
 
+                # Get a conversation turn:
+                #   1. no active turn -> create a new turn
+                #   2. a RUNNING turn exists -> the AI is replying; the user interjected
+                #   3. a COLLECTING turn exists -> inside the debounce window
                 turn = await self._ensure_turn(conversation)
-                # 尝试获取一个会话轮次:
-                #     1. 不存在活动状态的会话轮次 --> 创建一个新的会话轮次
-                #     2. 存在一个 RUNNING 状态的会话轮次 --> AI 还没回复，用户插话
-                #     3. 存在一个 COLLECTING 状态的会话轮次 --> 处于防抖窗口
                 LOG.debug(f"Ensured turn {turn}")
 
                 self._append_message_to_turn(turn, new_message)
 
             case ConversationMode.QUEUED | ConversationMode.HUMAN:
-                # 人工模式处理逻辑
+                # Human mode.
                 pass
             case _:
-                # 其他模式处理逻辑
+                # Other modes.
                 pass
 
         await self._db.commit()
@@ -87,9 +88,7 @@ class ChatService:
 
     # FIXME: 感觉确认会话的逻辑应该放到前端，并且调用接口前就该搞清楚 conversation id
     async def _ensure_conversation(self, user_id: str) -> Conversation:
-        """
-        确保会话存在，如果不存在则创建
-        """
+        """Ensure the conversation exists, creating one if needed."""
 
         db_result = await self._db.execute(
             select(Conversation)
@@ -109,7 +108,7 @@ class ChatService:
         conversation = db_result.scalar_one_or_none()
 
         if conversation:
-            # 当前用户存在未关闭的会话
+            # The user has an open conversation.
             if conversation.is_expired():
                 LOG.info(
                     f"Conversation[{conversation.mode}] {conversation.id} is expired, closing it"
@@ -117,7 +116,7 @@ class ChatService:
                 conversation.close()
                 await self._db.flush()
             else:
-                # 如果有 Human 模式或未超时的 AI 模式会话，则直接返回该会话
+                # Return the active conversation (HUMAN or non-expired AI mode).
                 LOG.info(
                     f"Found active conversation[{conversation.mode}] {conversation.id} for user_id={user_id}"
                 )
@@ -126,7 +125,7 @@ class ChatService:
         LOG.info(
             f"No active conversation found for user_id={user_id}, creating a new one"
         )
-        # 创建新会话
+        # Create a new conversation.
         conversation = Conversation(
             user_id=user_id,
             mode=ConversationMode.AI,
@@ -137,10 +136,9 @@ class ChatService:
         return conversation
 
     async def _ensure_turn(self, conversation: Conversation) -> ConversationTurn | None:
-        """
-        尝试获取一个会话轮次
-        寻找一个处于 COLLECTING 或 OPENING 的会话轮次
-        如果没有，创建一个新的会话轮次
+        """Return the active turn for the conversation, creating one if needed.
+
+        An active turn is in COLLECTING or RUNNING state.
         """
 
         db_result = await self._db.execute(
@@ -165,9 +163,7 @@ class ChatService:
         self,
         conversation: Conversation,
     ) -> ConversationTurn:
-        """
-        创建一个新的会话轮次，会话轮次不可能为空，因此要求传入第一条消息
-        """
+        """Create a new conversation turn for the first message."""
 
         turn = ConversationTurn(
             conversation_id=conversation.id,
@@ -185,30 +181,29 @@ class ChatService:
         turn: ConversationTurn,
         message: Message,
     ) -> None:
-        """
-        分两种情况:
-        1. 会话轮次处于 COLLECTING 状态，表示开启了新的轮次，直接将消息追加到当前轮次
-        2. 会话轮次处于 RUNNING 状态，表示 AI 正在回复，用户插话，创建新的轮次并将消息追加到新轮次
+        """Append a message to the conversation turn.
 
-        但是在追加逻辑中不予判断
-        仅更新 revision
-        当 AI 处理结果返回时，在 TurnWorker 中再根据情况具体处理
+        Two cases exist:
+        1. COLLECTING: a new turn is open, append the message directly.
+        2. RUNNING: the AI is replying and the user interjected; append the
+           message to the new turn.
+
+        This method does not branch on the case; it only bumps the revision.
+        TurnWorker decides how to handle it when the AI result returns.
         """
         turn.revision += 1
         message.turn_id = turn.id
 
     async def get_history(self, user_id: str) -> dict[str, Any]:
-        """
-        获取用户的历史消息，包括活跃会话、关闭会话
-        """
+        """Return the user's message history, including active and closed conversations."""
 
         LOG.info(f"Get History from user_id={user_id}")
 
-        # 查询用户的所有消息
+        # Query all messages of the user.
         db_result = await self._db.execute(
             select(
                 Message.uuid,
-                Conversation.uuid.label("conversation_id"),  # 对外 uuid
+                Conversation.uuid.label("conversation_id"),  # Public UUID.
                 Message.role,
                 Message.content,
                 Message.created_at,
@@ -228,7 +223,7 @@ class ChatService:
         )
 
         return {
-            "conversation_id": conversation.uuid,  # 当前会话 ID，用于区分历史消息和当前会话消息
-            "conversation_mode": conversation.mode,  # 当前会话模式，用于前端展示标签
+            "conversation_id": conversation.uuid,  # Current conversation ID.
+            "conversation_mode": conversation.mode,  # Mode label shown in the frontend.
             "messages": all_messages,
         }

@@ -20,7 +20,7 @@ async def lifespan(_: FastAPI):
         results = await asyncio.gather(worker, return_exceptions=True)
         exc = results[0]
         if isinstance(exc, Exception) and not isinstance(exc, asyncio.CancelledError):
-            LOG.exception("TurnWorker 意外退出", exc_info=exc)
+            LOG.exception(f"TurnWorker exited unexpectedly: {exc}", exc_info=exc)
 
 
 app = FastAPI(lifespan=lifespan)

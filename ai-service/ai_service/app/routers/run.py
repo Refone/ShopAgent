@@ -14,10 +14,8 @@ async def start_run_endpoint(
     payload: AgentRunRequest,
 ) -> AgentRunResponse:
     LOG.info(
-        "Agent run request: conversation_id=%s turn_id=%s revision=%s",
-        payload.conversation_id,
-        payload.turn_id,
-        payload.turn_revision,
+        f"Agent run request: conversation_id={payload.conversation_id} "
+        f"turn_id={payload.turn_id} revision={payload.turn_revision}"
     )
 
     reply_text = payload.messages[-1].content.get("text", "")
