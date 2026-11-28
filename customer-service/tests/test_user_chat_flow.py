@@ -89,7 +89,7 @@ def test_user_frontend_chat_flow(
         messages = (
             connection.execute(
                 text(
-                    "SELECT id, uuid, conversation_id, role, message_type, content "
+                    "SELECT id, uuid, conversation_id, turn_id, role, message_type, content "
                     "FROM messages WHERE conversation_id = :conversation_id"
                 ),
                 {"conversation_id": conversation["id"]},
@@ -109,7 +109,7 @@ def test_user_frontend_chat_flow(
         turns = (
             connection.execute(
                 text(
-                    "SELECT conversation_id, status, start_message_id, end_message_id "
+                    "SELECT id, conversation_id, status "
                     "FROM conversation_turns WHERE conversation_id = :conversation_id"
                 ),
                 {"conversation_id": conversation["id"]},
@@ -121,5 +121,5 @@ def test_user_frontend_chat_flow(
         turn = turns[0]
         assert turn["conversation_id"] == conversation["id"]
         assert turn["status"] == "COLLECTING"
-        assert turn["start_message_id"] == message["id"]
-        assert turn["end_message_id"] == message["id"]
+        # 轮次与消息通过 messages.turn_id 关联
+        assert message["turn_id"] == turn["id"]

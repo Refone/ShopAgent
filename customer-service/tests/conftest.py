@@ -29,7 +29,8 @@ def _delete_chat_user_data(engine: Engine, user_id: str) -> None:
     """
     params = {"user_id": user_id}
     with engine.begin() as connection:
-        for table in ("conversation_turns", "messages"):
+        # messages.turn_id 外键引用 conversation_turns，需先删除 messages 再删轮次
+        for table in ("messages", "conversation_turns"):
             connection.execute(
                 text(
                     f"DELETE FROM {table} "
